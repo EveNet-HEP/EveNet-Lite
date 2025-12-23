@@ -70,7 +70,7 @@ def weighted_roc_curve(
     fpr_interp = np.interp(tpr_uniform, fpr_raw, fpr_clipped)
     sigma_fpr_interp = np.interp(tpr_uniform, tpr_raw, sigma_fpr_raw)
 
-    auc = np.trapz(tpr_uniform, fpr_interp)
+    auc = np.trapz(tpr_raw, fpr_raw)
     return auc, fpr_interp, tpr_uniform, sigma_fpr_interp
 
 
