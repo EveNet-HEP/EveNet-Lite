@@ -347,7 +347,7 @@ def calculate_physics_metrics(
         weights: np.ndarray,
         training: bool,
         bins: int = 1000,
-        min_bkg_events: int = 100,
+        min_bkg_events: int = 500,
         log_plots: bool = False,
         wandb_run: Optional[object] = None,
         log_step: Optional[int] = None,
