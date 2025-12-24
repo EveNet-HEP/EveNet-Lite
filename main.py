@@ -227,6 +227,8 @@ if __name__ == '__main__':
         },
         global_input_dim=10,
         num_workers=0,
+        n_ensemble=3,
+        ensemble_mode="shared_backbone",
     )
 
     clf.fit(
@@ -238,7 +240,7 @@ if __name__ == '__main__':
         epochs=10,
         batch_size=128,
         sampler="weighted",  # or None
-        epoch_size=None,  # or None,
+        epoch_size=1280,  # or None,
         save_top_k=1,
         checkpoint_every=1,
         # checkpoint_path="./checkpoint",
