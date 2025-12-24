@@ -301,12 +301,17 @@ class EveNetLite(nn.Module):
 
     def expand_state_dict(self, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Expand a single-model checkpoint to match ensemble parameter names."""
-        if self.n_ensemble == 1:
-            return state
+        normalized_state: Dict[str, torch.Tensor] = {}
+        for key, value in state.items():
+            stripped = key
+            for prefix in ("model.", "module."):
+                if stripped.startswith(prefix):
+                    stripped = stripped[len(prefix) :]
+            normalized_state[stripped] = value
 
         if self.ensemble_mode == "independent":
-            return self._expand_independent(state)
-        return self._expand_shared(state)
+            return self._expand_independent(normalized_state)
+        return self._expand_shared(normalized_state)
 
 
 __all__ = ["EveNetLite"]
