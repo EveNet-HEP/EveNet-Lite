@@ -210,7 +210,10 @@ class EveNetLite(nn.Module):
         self.class_label = {"EVENT": cls_label}
         self.num_classes = {"EVENT": len(cls_label)}
         default_shared = {"GlobalEmbedding", "PET", "ObjectEncoder"} if ensemble_mode == "shared" else set()
-        shared_set: Set[str] = {name for name in (shared_modules or default_shared)}
+        if shared_modules is None:
+            shared_set: Set[str] = set(default_shared)
+        else:
+            shared_set = set(shared_modules)
         valid_share = {"GlobalEmbedding", "PET", "ObjectEncoder", "Classification"}
         invalid = shared_set - valid_share
         if invalid:
