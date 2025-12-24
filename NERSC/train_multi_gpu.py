@@ -138,6 +138,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DDP-friendly Evenet-Lite runner for NERSC")
     parser.add_argument("--train-sig", type=str, required=True, help="Path or glob pattern to signal training tensor (.pt)")
     parser.add_argument("--train-bkg", type=str, required=True, help="Path or glob pattern to background training tensor (.pt)")
+    parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=0.7,
+        help="Fraction of the training split to use for fitting (rest used for validation)",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="Random seed used when splitting the training set into train/validation",
+    )
     parser.add_argument("--val-sig", type=str, help="Optional path or glob pattern to signal validation tensor (.pt)")
     parser.add_argument("--val-bkg", type=str, help="Optional path or glob pattern to background validation tensor (.pt)")
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
@@ -186,6 +198,11 @@ def parse_args() -> argparse.Namespace:
         "--feature-names",
         type=Path,
         help="Optional YAML/JSON file providing feature names for each input group",
+    )
+    parser.add_argument(
+        "--normalization-stats",
+        type=Path,
+        help="Optional YAML/JSON file with precomputed normalization stats to pass to the trainer",
     )
     parser.add_argument(
         "--normalization-rules",
@@ -269,6 +286,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers", type=int, default=0, help="Number of workers for data loading"
     )
+    parser.add_argument("--n-ensemble", type=int, default=1, help="Number of ensemble members in the EveNet-Lite model")
+    parser.add_argument(
+        "--ensemble-mode",
+        type=str,
+        choices=["independent", "shared_backbone"],
+        default="independent",
+        help="Whether ensemble heads share a backbone or are fully independent",
+    )
 
     return parser.parse_args()
 
@@ -279,6 +304,7 @@ def main() -> None:
 
     feature_names: Optional[Dict[str, Iterable[str]]] = None
     normalization_rules: Optional[Dict[str, Dict[str, str]]] = None
+    normalization_stats: Optional[Dict[str, Any]] = None
 
     def _load_yaml_or_json(path: Path) -> Dict[str, Any]:
         with open(path) as handle:
@@ -289,28 +315,44 @@ def main() -> None:
 
     if args.normalization_rules:
         normalization_rules = _load_yaml_or_json(args.normalization_rules)
+    if args.normalization_stats:
+        normalization_stats = _load_yaml_or_json(args.normalization_stats)
 
     (train_features, train_labels, train_weights) = _load_split(
         _resolve_paths(args.train_sig, "train signal"),
         _resolve_paths(args.train_bkg, "train background"),
     )
 
-    val_features = None
-    val_labels = None
-    val_weights = None
-    if args.val_sig and args.val_bkg:
-        val_features, val_labels, val_weights = _load_split(
-            _resolve_paths(args.val_sig, "validation signal"),
-            _resolve_paths(args.val_bkg, "validation background"),
-        )
+    if not 0 < args.train_fraction < 1:
+        raise ValueError("--train-fraction must be between 0 and 1 (exclusive)")
+
+    total_train = train_labels.shape[0]
+    split_seed = torch.Generator().manual_seed(args.split_seed) if args.split_seed is not None else None
+    perm = torch.randperm(total_train, generator=split_seed)
+    train_size = int(args.train_fraction * total_train)
+    train_idx = perm[:train_size]
+    val_idx = perm[train_size:]
+
+    def _slice_features(features: Dict[str, torch.Tensor], indices: torch.Tensor) -> Dict[str, torch.Tensor]:
+        return {name: tensor[indices] for name, tensor in features.items()}
+
+    val_features = _slice_features(train_features, val_idx)
+    val_labels = train_labels[val_idx]
+    val_weights = train_weights[val_idx] if train_weights is not None else None
+
+    train_features = _slice_features(train_features, train_idx)
+    train_labels = train_labels[train_idx]
+    train_weights = train_weights[train_idx] if train_weights is not None else None
 
     eval_features = None
     eval_labels = None
     eval_weights = None
-    if args.eval_sig and args.eval_bkg:
+    eval_sig_pattern = args.eval_sig or args.val_sig
+    eval_bkg_pattern = args.eval_bkg or args.val_bkg
+    if eval_sig_pattern and eval_bkg_pattern:
         eval_features, eval_labels, eval_weights = _load_split(
-            _resolve_paths(args.eval_sig, "evaluation signal"),
-            _resolve_paths(args.eval_bkg, "evaluation background"),
+            _resolve_paths(eval_sig_pattern, "evaluation signal"),
+            _resolve_paths(eval_bkg_pattern, "evaluation background"),
         )
 
 
@@ -338,6 +380,8 @@ def main() -> None:
             "name": args.wandb_name,
         },
         num_workers=args.num_workers,
+        n_ensemble=args.n_ensemble,
+        ensemble_mode=args.ensemble_mode,
     )
 
     run_evenet_lite_training(
@@ -350,6 +394,7 @@ def main() -> None:
         class_labels=args.class_labels,
         feature_names=feature_names,
         normalization_rules=normalization_rules,
+        normalization_stats=normalization_stats,
         sampler=None if args.sampler == "none" else args.sampler,
         epoch_size=args.epoch_size,
         epochs=args.epochs,
