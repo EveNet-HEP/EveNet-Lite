@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time", default="04:00:00", help="Walltime for each array element")
     parser.add_argument("--account", default="m2616_g", help="NERSC account")
     parser.add_argument("--queue", default="regular", help="Slurm queue/partition")
-    parser.add_argument("--nodes", type=int, default=2, help="Nodes per mass-point job")
+    parser.add_argument("--nodes", type=int, default=1, help="Nodes per mass-point job")
     parser.add_argument(
         "--gpus-per-node",
         type=int,
@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
         default=Path("./checkpoints/"),
         help="Base directory where checkpoints will be stored per mass point",
     )
-    parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
-    parser.add_argument("--batch-size", type=int, default=512, help="Training batch size")
+    parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Training batch size")
     parser.add_argument(
         "--sampler",
         choices=["weighted", "none"],
@@ -156,6 +156,8 @@ def write_slurm_script(args: argparse.Namespace, signals: List[Tuple[str, str, s
         f"--pretrained-path \\\"{args.pretrained_path}\\\"",
         "--pretrained-source local",
         "--wandb-name \\\"${MASS_POINT}\\\"",
+        "--lr 1e-4,5e-5,1e-5",
+
     ]
     if extra_args:
         command_parts.append(extra_args)
