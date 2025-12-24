@@ -414,11 +414,13 @@ class EvenetLiteClassifier:
             def _component_prefix(key: str) -> str:
                 tokens = key.split(".")
                 if tokens and tokens[0] == "models" and len(tokens) >= 3:
-                    # e.g., models.0.backbone.layer → models.0.backbone
-                    return ".".join(tokens[:3])
-                if tokens and tokens[0] in {"backbone", "Classification"} and len(tokens) >= 2:
-                    # e.g., Classification.0.layer → Classification.0
-                    return ".".join(tokens[:2])
+                    tokens = tokens[2:]  # drop "models.<idx>"
+                if tokens and tokens[0] == "backbone":
+                    tokens = tokens[1:]
+                if tokens and tokens[0] in {"Classification", "GlobalEmbedding", "PET", "ObjectEncoder"}:
+                    if len(tokens) > 1 and tokens[1].isdigit():
+                        return tokens[0]
+                    return tokens[0]
                 return tokens[0] if tokens else key
 
             total_groups = Counter([_component_prefix(k) for k in model_state])
