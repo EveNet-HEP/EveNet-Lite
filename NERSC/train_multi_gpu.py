@@ -244,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for scheduler")
     parser.add_argument("--global-input-dim", type=int, default=10, help="Number of global features")
     parser.add_argument("--sequential-input-dim", type=int, default=7, help="Number of sequential features per object")
-    parser.add_argument("--sic-min-bkg-events", type=int, default=100, help="Minimum background events for SIC")
+    parser.add_argument("--sic-min-bkg-events", type=int, default=10, help="Minimum background events for SIC")
     parser.add_argument(
         "--use-wandb",
         action=argparse.BooleanOptionalAction,
