@@ -233,7 +233,6 @@ srun -l shifter \\
 def main() -> None:
     args = parse_args()
     signals = find_signal_datasets(args.data_root)
-    print(signals)
     if args.only_masses is not None:
         keep = set(args.only_masses)
         signals = [s for s in signals if s[0] in keep]
