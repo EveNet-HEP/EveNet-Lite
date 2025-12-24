@@ -99,6 +99,8 @@ class EvenetLiteClassifier:
             pretrained_filename: Optional[str] = DEFAULT_HF_REPO_FILENAME,
             pretrained_cache_dir: Optional[str] = None,
             num_workers: int = 0,
+            n_ensemble: int = 1,
+            ensemble_mode: str = "independent",
     ) -> None:
         root_logger = logging.getLogger()
         log_format = "%(asctime)s | %(levelname)s | %(message)s"
@@ -123,7 +125,9 @@ class EvenetLiteClassifier:
                 config=DotDict(config),
                 global_input_dim=global_input_dim,
                 sequential_input_dim=sequential_input_dim,
-                cls_label=class_labels
+                cls_label=class_labels,
+                n_ensemble=n_ensemble,
+                ensemble_mode=ensemble_mode,
             )
         else:
             self.model = model
@@ -361,7 +365,9 @@ class EvenetLiteClassifier:
         """Partially load a state dict when shapes match and report a summary."""
 
         logger = logging.getLogger(__name__)
-        ckpt_state = {k.replace("model.", ""): v for k, v in state.items()}
+        ckpt_state = {k.replace("model.", "").replace("module.", ""): v for k, v in state.items()}
+        if hasattr(self.model, "expand_state_dict"):
+            ckpt_state = self.model.expand_state_dict(ckpt_state)
         model_state = self.model.state_dict()
 
         loaded_keys: List[str] = []

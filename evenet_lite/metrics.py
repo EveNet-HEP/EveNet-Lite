@@ -9,7 +9,34 @@ from scipy.special import expit, softmax
 from sklearn.metrics import roc_auc_score
 
 
+def _flatten_ensemble(
+        logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Flatten an ensemble logits tensor to align with repeated targets/weights.
+
+    Shapes
+    ------
+    logits: [E, B, C] -> [E * B, C]
+    targets: [B] -> [E * B]
+    weights: [B] -> [E * B]
+    """
+
+    if logits.dim() == 3:
+        ensemble, batch, channels = logits.shape
+        logits = logits.view(ensemble * batch, channels)
+        targets = targets.repeat(ensemble)
+        if weights is not None:
+            weights = weights.repeat(ensemble)
+    return logits, targets, weights
+
+
+def _mean_ensemble_logits(logits: torch.Tensor) -> torch.Tensor:
+    """Average ensemble logits along the ensemble dimension."""
+    return logits.mean(dim=0) if logits.dim() == 3 else logits
+
+
 def compute_loss(logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]) -> torch.Tensor:
+    logits, targets, weights = _flatten_ensemble(logits, targets, weights)
     per_sample = F.cross_entropy(logits, targets, reduction="none")
     if weights is not None:
         weights = weights.to(per_sample.device)
@@ -18,6 +45,7 @@ def compute_loss(logits: torch.Tensor, targets: torch.Tensor, weights: Optional[
 
 
 def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    logits = _mean_ensemble_logits(logits)
     preds = logits.argmax(dim=1)
     correct = (preds == targets).sum().item()
     return correct / max(1, targets.numel())
@@ -353,6 +381,9 @@ def calculate_physics_metrics(
         f_name: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
+
+    if logits.ndim == 3:
+        logits = logits.mean(axis=0)
 
     # Convert logits → scores
     if logits.ndim == 1 or logits.shape[1] == 1:

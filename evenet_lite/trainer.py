@@ -853,7 +853,8 @@ class Trainer:
             #     metric_sum["nan_loss"] += 1
             metric_count["loss"] += targets.size(0)
 
-            preds = torch.argmax(outputs, dim=1)
+            logits_for_metrics = outputs.mean(dim=0) if outputs.dim() == 3 else outputs
+            preds = torch.argmax(logits_for_metrics, dim=1)
             batch_accuracy = compute_accuracy(outputs, targets)
             if metric_tracker is not None:
                 metric_tracker.update(preds, targets)
@@ -865,7 +866,7 @@ class Trainer:
             reduced_accuracy = self._reduce_mean_scalar(batch_accuracy)
 
             if self.config.compute_physics_metrics:
-                epoch_probs.append(outputs.detach())
+                epoch_probs.append(logits_for_metrics.detach())
                 epoch_targets.append(targets.detach())
                 metric_weights = (
                     weight_tensor.detach()
@@ -1026,7 +1027,9 @@ class Trainer:
                 features, _, _, *maybe_idx = batch
                 batch_indices = maybe_idx[0] if maybe_idx else None
                 features = self._prepare_features(features)
-                outputs = self._forward(self.model, features).detach().cpu()
+                outputs = self._forward(self.model, features)
+                outputs = outputs.mean(dim=0) if outputs.dim() == 3 else outputs
+                outputs = outputs.detach().cpu()
                 local_outputs.append(outputs)
                 if batch_indices is not None:
                     local_indices.append(batch_indices.cpu())
