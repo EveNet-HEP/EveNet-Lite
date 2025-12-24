@@ -101,6 +101,7 @@ class EvenetLiteClassifier:
             num_workers: int = 0,
             n_ensemble: int = 1,
             ensemble_mode: str = "independent",
+            shared_modules: Optional[List[str]] = None,
     ) -> None:
         root_logger = logging.getLogger()
         log_format = "%(asctime)s | %(levelname)s | %(message)s"
@@ -128,6 +129,7 @@ class EvenetLiteClassifier:
                 cls_label=class_labels,
                 n_ensemble=n_ensemble,
                 ensemble_mode=ensemble_mode,
+                shared_modules=shared_modules,
             )
         else:
             self.model = model
