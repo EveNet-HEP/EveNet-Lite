@@ -89,7 +89,8 @@ def _match_bkg_sample(path: Path) -> str:
 def _make_sample_weights(path: Path, n_events: int) -> torch.Tensor:
     sample = _match_bkg_sample(path)
     meta = BKG_META[sample]
-    w = meta["xsec"] / meta["nEvent"]
+    # w = meta["xsec"] / meta["nEvent"]
+    w = meta["xsec"] / meta["nEvent"] * 1000 * 36
     return torch.full((n_events,), w, dtype=torch.float32)
 
 def _load_split(sig_paths: List[Path], bkg_paths: List[Path]):
