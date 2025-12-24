@@ -197,8 +197,8 @@ class EveNetLite(nn.Module):
 
         if n_ensemble < 1:
             raise ValueError("n_ensemble must be >= 1")
-        if ensemble_mode not in {"independent", "shared_backbone"}:
-            raise ValueError("ensemble_mode must be 'independent' or 'shared_backbone'")
+        if ensemble_mode not in {"independent", "shared"}:
+            raise ValueError("ensemble_mode must be 'independent' or 'shared'")
 
         self.n_ensemble = n_ensemble
         self.ensemble_mode = ensemble_mode
@@ -209,7 +209,8 @@ class EveNetLite(nn.Module):
 
         self.class_label = {"EVENT": cls_label}
         self.num_classes = {"EVENT": len(cls_label)}
-        shared_set: Set[str] = {name for name in (shared_modules or [])}
+        default_shared = {"GlobalEmbedding", "PET", "ObjectEncoder"} if ensemble_mode == "shared" else set()
+        shared_set: Set[str] = {name for name in (shared_modules or default_shared)}
         valid_share = {"GlobalEmbedding", "PET", "ObjectEncoder", "Classification"}
         invalid = shared_set - valid_share
         if invalid:
@@ -272,19 +273,19 @@ class EveNetLite(nn.Module):
 
     @property
     def GlobalEmbedding(self) -> GlobalVectorEmbedding | None:
-        if self.ensemble_mode == "shared_backbone":
+        if self.ensemble_mode == "shared":
             return self.backbone.GlobalEmbedding
         return None
 
     @property
     def PET(self) -> PETBody | None:
-        if self.ensemble_mode == "shared_backbone":
+        if self.ensemble_mode == "shared":
             return self.backbone.PET
         return None
 
     @property
     def ObjectEncoder(self) -> ObjectEncoder | None:
-        if self.ensemble_mode == "shared_backbone":
+        if self.ensemble_mode == "shared":
             return self.backbone.ObjectEncoder
         return None
 
