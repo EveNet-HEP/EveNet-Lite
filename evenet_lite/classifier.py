@@ -411,6 +411,10 @@ class EvenetLiteClassifier:
         logger.info("All components loaded: %s", "YES" if fully_loaded else "NO")
 
         if model_state:
+            component_copies = {}
+            if hasattr(self.model, "component_copies"):
+                component_copies = self.model.component_copies()
+
             def _component_prefix(key: str) -> str:
                 tokens = key.split(".")
                 if tokens and tokens[0] == "models" and len(tokens) >= 3:
@@ -434,9 +438,11 @@ class EvenetLiteClassifier:
                 missing_count = missing_groups.get(prefix, 0)
                 mismatch_count = mismatch_groups.get(prefix, 0)
                 not_loaded = total - loaded_count
+                copies = component_copies.get(prefix, 1)
                 logger.info(
-                    "• %s: %d/%d loaded (%d not loaded: %d missing, %d mismatched)",
+                    "• %s [copies=%d]: %d/%d loaded (%d not loaded: %d missing, %d mismatched)",
                     prefix.ljust(15),
+                    copies,
                     loaded_count,
                     total,
                     not_loaded,
