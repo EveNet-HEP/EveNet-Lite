@@ -9,6 +9,7 @@ resolve at runtime.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List
 
 import torch
@@ -218,6 +219,8 @@ class EveNetLite(nn.Module):
             self.Classification = nn.ModuleList(head_builder() for _ in range(self.n_ensemble))
             self.local_feature_indices = self.backbone.local_feature_indices
 
+        self._log_ensemble_structure()
+
     @property
     def GlobalEmbedding(self) -> GlobalVectorEmbedding | None:
         if self.ensemble_mode == "shared_backbone":
@@ -249,6 +252,43 @@ class EveNetLite(nn.Module):
         if self.n_ensemble == 1:
             return outputs[0]
         return torch.stack(outputs, dim=0)
+
+    def component_copies(self) -> Dict[str, int]:
+        """Return the number of copies for each major component."""
+
+        base = {
+            "GlobalEmbedding": 1,
+            "PET": 1,
+            "ObjectEncoder": 1,
+            "Classification": 1,
+        }
+        if self.ensemble_mode == "independent":
+            return {name: self.n_ensemble for name in base}
+
+        base["Classification"] = self.n_ensemble
+        return base
+
+    def _log_ensemble_structure(self) -> None:
+        if self.n_ensemble <= 1:
+            return
+
+        logger = logging.getLogger(__name__)
+        copies = self.component_copies()
+        replicated = {name: count for name, count in copies.items() if count > 1}
+        shared = [name for name, count in copies.items() if count == 1]
+
+        logger.info(
+            "Configured EveNet-Lite ensemble: n_ensemble=%d, mode=%s",
+            self.n_ensemble,
+            self.ensemble_mode,
+        )
+        if replicated:
+            logger.info(
+                "Replicated components: %s",
+                ", ".join(f"{name} x{count}" for name, count in replicated.items()),
+            )
+        if shared:
+            logger.info("Shared components: %s", ", ".join(shared))
 
     def _expand_independent(self, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         if any(key.startswith("models.") for key in state):
