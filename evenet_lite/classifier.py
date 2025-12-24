@@ -411,10 +411,20 @@ class EvenetLiteClassifier:
         logger.info("All components loaded: %s", "YES" if fully_loaded else "NO")
 
         if model_state:
-            total_groups = Counter([k.split(".")[0] for k in model_state])
-            loaded_groups = Counter([k.split(".")[0] for k in loaded_keys])
-            missing_groups = Counter([k.split(".")[0] for k in missing_keys])
-            mismatch_groups = Counter([k.split(".")[0] for k in shape_mismatch_keys])
+            def _component_prefix(key: str) -> str:
+                tokens = key.split(".")
+                if tokens and tokens[0] == "models" and len(tokens) >= 3:
+                    # e.g., models.0.backbone.layer → models.0.backbone
+                    return ".".join(tokens[:3])
+                if tokens and tokens[0] in {"backbone", "Classification"} and len(tokens) >= 2:
+                    # e.g., Classification.0.layer → Classification.0
+                    return ".".join(tokens[:2])
+                return tokens[0] if tokens else key
+
+            total_groups = Counter([_component_prefix(k) for k in model_state])
+            loaded_groups = Counter([_component_prefix(k) for k in loaded_keys])
+            missing_groups = Counter([_component_prefix(k) for k in missing_keys])
+            mismatch_groups = Counter([_component_prefix(k) for k in shape_mismatch_keys])
 
             logger.info("--- Breakdown ---")
             for prefix, total in total_groups.items():
