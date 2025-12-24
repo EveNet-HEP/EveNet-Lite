@@ -219,88 +219,58 @@ class EveNetLite(nn.Module):
         if invalid:
             raise ValueError(f"Unsupported shared module names: {sorted(invalid)}")
 
-        def _build_components() -> Dict[str, object]:
-            backbone = EveNetBackbone(config, global_input_dim, sequential_input_dim)
-            head_dim = backbone.head_input_dim
-            head = _build_classification_head(config, self.class_label, self.num_classes, head_dim)
-            return {
-                "backbone": backbone,
-                "Classification": head,
-                "local_feature_indices": backbone.local_feature_indices,
-                "head_dim": head_dim,
-            }
-
-        template = _build_components()
-        self.local_feature_indices = template["local_feature_indices"]
+        template_backbone = EveNetBackbone(config, global_input_dim, sequential_input_dim)
+        head_dim = template_backbone.head_input_dim
+        template_head = _build_classification_head(config, self.class_label, self.num_classes, head_dim)
+        self.local_feature_indices = template_backbone.local_feature_indices
 
         shared_pool: Dict[str, nn.Module] = {}
-        for name in shared_set:
-            if name == "Classification":
-                shared_pool[name] = template["Classification"]
-            else:
-                shared_pool[name] = getattr(template["backbone"], name)
+        if "GlobalEmbedding" in shared_set:
+            shared_pool["GlobalEmbedding"] = template_backbone.GlobalEmbedding
+        if "PET" in shared_set:
+            shared_pool["PET"] = template_backbone.PET
+        if "ObjectEncoder" in shared_set:
+            shared_pool["ObjectEncoder"] = template_backbone.ObjectEncoder
+        if "Classification" in shared_set:
+            shared_pool["Classification"] = template_head
 
-        def _member_components() -> Dict[str, object]:
-            comps = _build_components()
-            if "GlobalEmbedding" in shared_pool:
-                comps["backbone"].GlobalEmbedding = shared_pool["GlobalEmbedding"]
-            if "PET" in shared_pool:
-                comps["backbone"].PET = shared_pool["PET"]
-            if "ObjectEncoder" in shared_pool:
-                comps["backbone"].ObjectEncoder = shared_pool["ObjectEncoder"]
-            if "Classification" in shared_pool:
-                comps["Classification"] = shared_pool["Classification"]
-            comps["backbone"].local_feature_indices = self.local_feature_indices
-            return comps
-
-        if self.ensemble_mode == "independent":
-            members: List[_EveNetLiteSingle] = []
-            for _ in range(self.n_ensemble):
-                comps = _member_components()
-                members.append(_EveNetLiteSingle(comps["backbone"], comps["Classification"]))
-            self.models = nn.ModuleList(members)
-        else:
-            self.backbone = template["backbone"]
-            head_dim = template["head_dim"]
-            self.Classification = nn.ModuleList(
-                shared_pool.get("Classification", None) or _build_classification_head(
-                    config, self.class_label, self.num_classes, head_dim
-                )
-                for _ in range(self.n_ensemble)
+        members: List[_EveNetLiteSingle] = []
+        for _ in range(self.n_ensemble):
+            backbone = EveNetBackbone(
+                config,
+                global_input_dim,
+                sequential_input_dim,
+                global_embedding=shared_pool.get("GlobalEmbedding"),
+                pet=shared_pool.get("PET"),
+                object_encoder=shared_pool.get("ObjectEncoder"),
+                local_feature_indices=self.local_feature_indices,
             )
-            if "Classification" in shared_pool:
-                for idx in range(1, self.n_ensemble):
-                    self.Classification[idx] = shared_pool["Classification"]
-            self.local_feature_indices = self.backbone.local_feature_indices
+            head = shared_pool.get("Classification") or _build_classification_head(
+                config, self.class_label, self.num_classes, head_dim
+            )
+            members.append(_EveNetLiteSingle(backbone, head))
+
+        self.models = nn.ModuleList(members)
         self._log_ensemble_structure(shared_set)
 
     @property
     def GlobalEmbedding(self) -> GlobalVectorEmbedding | None:
-        if self.ensemble_mode == "shared":
-            return self.backbone.GlobalEmbedding
-        return None
+        return self.models[0].backbone.GlobalEmbedding if self.models else None
 
     @property
     def PET(self) -> PETBody | None:
-        if self.ensemble_mode == "shared":
-            return self.backbone.PET
-        return None
+        return self.models[0].backbone.PET if self.models else None
 
     @property
     def ObjectEncoder(self) -> ObjectEncoder | None:
-        if self.ensemble_mode == "shared":
-            return self.backbone.ObjectEncoder
-        return None
+        return self.models[0].backbone.ObjectEncoder if self.models else None
+
+    @property
+    def Classification(self) -> ClassificationHead | None:
+        return self.models[0].Classification if self.models else None
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor, globals: torch.Tensor) -> torch.Tensor:
-        if self.ensemble_mode == "independent":
-            outputs = [model(x=x, x_mask=x_mask, globals=globals) for model in self.models]
-        else:
-            embeddings, input_point_cloud_mask, event_token = self.backbone(x, x_mask, globals)
-            outputs = [
-                _apply_classification_head(head, embeddings, input_point_cloud_mask, event_token)
-                for head in self.Classification
-            ]
+        outputs = [model(x=x, x_mask=x_mask, globals=globals) for model in self.models]
 
         if self.n_ensemble == 1:
             return outputs[0]
@@ -338,15 +308,6 @@ class EveNetLite(nn.Module):
         return expanded
 
     def _expand_shared(self, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        has_backbone_prefix = any(key.startswith("backbone.") for key in state)
-        has_indexed_classification = any(
-            key.startswith("Classification.")
-            and key[len("Classification.") :].split(".", 1)[0].isdigit()
-            for key in state
-        )
-        if has_backbone_prefix and has_indexed_classification:
-            return state
-
         expanded: Dict[str, torch.Tensor] = {}
         for key, value in state.items():
             base_key = key
@@ -357,16 +318,18 @@ class EveNetLite(nn.Module):
                 remainder = base_key[len("Classification.") :]
                 first_token = remainder.split(".", 1)[0]
                 if first_token.isdigit():
-                    expanded[f"Classification.{remainder}"] = value
+                    for idx in range(self.n_ensemble):
+                        expanded[f"models.{idx}.Classification.{remainder}"] = value
                 else:
                     for idx in range(self.n_ensemble):
-                        expanded[f"Classification.{idx}.{remainder}"] = value
+                        expanded[f"models.{idx}.Classification.{remainder}"] = value
             elif base_key.startswith("Classification"):
                 suffix = base_key[len("Classification") :]
                 for idx in range(self.n_ensemble):
-                    expanded[f"Classification.{idx}{suffix}"] = value
+                    expanded[f"models.{idx}.Classification{suffix}"] = value
             elif base_key:
-                expanded[f"backbone.{base_key}"] = value
+                for idx in range(self.n_ensemble):
+                    expanded[f"models.{idx}.backbone.{base_key}"] = value
 
         return expanded
 
