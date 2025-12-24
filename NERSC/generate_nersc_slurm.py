@@ -204,7 +204,7 @@ for idx in "${{!SIGNAL_LABELS[@]}}"; do
 
   cmd="{command_template}"
 
-  srun -l shifter \\
+  srun --nodes={args.nodes} --ntasks-per-node={ntasks_per_node} --gpus-per-node={args.gpus_per_node}  -l shifter \\
     bash -c "source export_DDP_vars.sh && ${{cmd}}"
 done
 """
@@ -222,7 +222,7 @@ mkdir -p "${{OUTPUT_DIR}}" "${{EVAL_OUTPUT}}"
 cmd="{command_template}"
 
 set -x
-srun --ntasks-per-node={ntasks_per_node} --gpus-per-node={args.gpus_per_node} -l shifter \\
+srun -l shifter \\
   bash -c "source export_DDP_vars.sh && ${{cmd}}"
 """
 
