@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing signal/background subdirectories",
     )
     parser.add_argument(
+        "--only-masses",
+        nargs="+",
+        default=None,
+        help="Only run these mass labels, e.g. MX300_MY50 MX500_MY100",
+    )
+    parser.add_argument(
         "--background",
         dest="backgrounds",
         action="append",
@@ -227,6 +233,13 @@ srun -l shifter \\
 def main() -> None:
     args = parse_args()
     signals = find_signal_datasets(args.data_root)
+
+    if args.only_masses is not None:
+        keep = set(args.only_masses)
+        signals = [s for s in signals if s[0] in keep]
+        if not signals:
+            raise SystemExit(f"No matching mass points in --only-masses {args.only_masses}")
+
     write_slurm_script(args, signals)
 
 
