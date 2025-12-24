@@ -11,7 +11,8 @@ import re
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
-SIGNAL_PATTERN = re.compile(r"^(?P<dsid>\d+)_NMSSM_.*_MX-(?P<mx>\d+)_MY-(?P<my>\d+)_.*")
+# SIGNAL_PATTERN = re.compile(r"^(?P<dsid>\d+)_NMSSM_.*_MX-(?P<mx>\d+)_MY-(?P<my>\d+)_.*")
+SIGNAL_PATTERN = re.compile(r"MX-(?P<mx>\d+)_MY-(?P<my>\d+)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("../data"),
+        default=Path("/global/cfs/cdirs/m5019/tihsu"),
         help="Directory containing signal/background subdirectories",
     )
     parser.add_argument(
@@ -27,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         dest="backgrounds",
         action="append",
         default=[
-            "67993_TTToSemiLeptonic_TuneCP5_13TeV-powheg-pythia8_RunIISummer20UL16NanoAODv9-106X_mcRun2_asymptotic_v17-v1_NANOAODSIM",
+            "ggHtautau", "VBFHtautau", "DYBJets_pt100to200", "DYBJets_pt200toInf", "tt1l"
         ],
         help="Background directory name (relative to data root). Provide multiple times to include more.",
     )
