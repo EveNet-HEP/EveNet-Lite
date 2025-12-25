@@ -1263,6 +1263,7 @@ class Trainer:
                     min_bkg_events=self.config.sic_min_bkg_events,
                     log_plots=self.wandb_run is not None,
                     wandb_run=self.wandb_run,
+                    f_name=Path(output_path) / "eval.png",
                 )
             )
 
