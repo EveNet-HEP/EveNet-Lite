@@ -1007,6 +1007,13 @@ class Trainer:
     def _collect_predictions(
             self, dataset: EvenetTensorDataset, batch_size: int = 256
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if self.debug:
+            rank = getattr(self, "rank", 0)
+            print(f"[Rank {rank}] Starting _collect_predictions")
+            print(f"[Rank {rank}] Dataset size = {len(dataset)}")
+            print(f"[Rank {rank}] Batch size = {batch_size}")
+
         original_flag = getattr(dataset, "include_indices", False)
         dataset.include_indices = True
 
@@ -1019,49 +1026,113 @@ class Trainer:
             num_workers=self.config.num_workers,
         )
 
+        if self.debug:
+            print(
+                f"[Rank {rank}] world_size={self.world_size}, "
+                f"sampler={'DistributedSampler' if sampler else 'None'}, "
+                f"num_workers={self.config.num_workers}"
+            )
+
         self.model.to(self.device)
         self.model.eval()
+
         local_outputs: List[torch.Tensor] = []
         local_indices: List[torch.Tensor] = []
 
         with torch.no_grad():
-            for batch in loader:
+            for step, batch in enumerate(loader):
                 features, _, _, *maybe_idx = batch
                 batch_indices = maybe_idx[0] if maybe_idx else None
+
+                if self.debug and step == 0:
+                    print(f"[Rank {rank}] First batch received")
+                    if batch_indices is not None:
+                        print(
+                            f"[Rank {rank}] batch_indices shape = {batch_indices.shape}, "
+                            f"min={batch_indices.min().item()}, "
+                            f"max={batch_indices.max().item()}"
+                        )
+
                 features = self._prepare_features(features)
                 outputs = self._forward(self.model, features)
+
+                if self.debug and step == 0:
+                    print(
+                        f"[Rank {rank}] Raw outputs shape = {tuple(outputs.shape)}"
+                    )
+
+                # Ensemble case: [E, B, C] → [B, C]
                 outputs = outputs.mean(dim=0) if outputs.dim() == 3 else outputs
                 outputs = outputs.detach().cpu()
+
                 local_outputs.append(outputs)
+
                 if batch_indices is not None:
                     local_indices.append(batch_indices.cpu())
 
         dataset.include_indices = original_flag
 
         preds_tensor = torch.cat(local_outputs, dim=0) if local_outputs else torch.empty((0,))
-        index_tensor = torch.cat(local_indices, dim=0) if local_indices else torch.empty((0,), dtype=torch.long)
+        index_tensor = (
+            torch.cat(local_indices, dim=0)
+            if local_indices
+            else torch.empty((0,), dtype=torch.long)
+        )
 
+        if self.debug:
+            print(
+                f"[Rank {rank}] Local preds shape = {tuple(preds_tensor.shape)}, "
+                f"indices shape = {tuple(index_tensor.shape)}"
+            )
+
+        # ------------------------
+        # DDP gather
+        # ------------------------
         if self.world_size > 1:
             gathered_indices: List[Optional[torch.Tensor]] = [None for _ in range(self.world_size)]
             gathered_preds: List[Optional[torch.Tensor]] = [None for _ in range(self.world_size)]
+
             dist.all_gather_object(gathered_indices, index_tensor)
             dist.all_gather_object(gathered_preds, preds_tensor)
 
+            if self.debug:
+                sizes = [
+                    (gi.shape if gi is not None else None)
+                    for gi in gathered_indices
+                ]
+                print(f"[Rank {rank}] Gathered index shapes per rank = {sizes}")
+
             index_tensor = torch.cat([g for g in gathered_indices if g is not None], dim=0)
             preds_tensor = torch.cat([g for g in gathered_preds if g is not None], dim=0)
+
+            if self.debug:
+                print(
+                    f"[Rank {rank}] After gather: "
+                    f"indices={index_tensor.shape}, preds={preds_tensor.shape}"
+                )
 
             if index_tensor.numel() > 0:
                 order = torch.argsort(index_tensor)
                 index_tensor = index_tensor[order]
                 preds_tensor = preds_tensor[order]
 
-                # Remove any duplicated indices introduced by DistributedSampler padding
-                if index_tensor.numel() > 0:
-                    unique_mask = torch.ones_like(index_tensor, dtype=torch.bool)
-                    unique_mask[1:] = index_tensor[1:] != index_tensor[:-1]
-                    unique_positions = torch.nonzero(unique_mask, as_tuple=False).squeeze(1)
-                    index_tensor = index_tensor[unique_positions]
-                    preds_tensor = preds_tensor[unique_positions]
+                # Remove duplicated indices (DistributedSampler padding)
+                unique_mask = torch.ones_like(index_tensor, dtype=torch.bool)
+                unique_mask[1:] = index_tensor[1:] != index_tensor[:-1]
+                unique_positions = torch.nonzero(unique_mask, as_tuple=False).squeeze(1)
+
+                if self.debug:
+                    removed = index_tensor.numel() - unique_positions.numel()
+                    print(f"[Rank {rank}] Removed {removed} duplicated entries")
+
+                index_tensor = index_tensor[unique_positions]
+                preds_tensor = preds_tensor[unique_positions]
+
+        if self.debug:
+            print(
+                f"[Rank {rank}] Final output: "
+                f"indices={index_tensor.shape}, preds={preds_tensor.shape}"
+            )
 
         return preds_tensor, index_tensor
 
