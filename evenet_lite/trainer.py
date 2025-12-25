@@ -519,15 +519,16 @@ class Trainer:
                     )
                     break
 
-            if best_model_state is not None:
-                self._load_model_state(best_model_state)
-                if self.is_rank_zero():
-                    logging.info(
-                        "Restored best model from epoch %d based on %s=%.4f",
-                        (best_epoch or 0) + 1,
-                        self.config.early_stop_metric,
-                        best_metric if best_metric is not None else float("nan"),
-                    )
+            # ALL ranks must participate in the broadcast inside _load_model_state
+            self._load_model_state(best_model_state)
+
+            if self.is_rank_zero() and best_model_state is not None:
+                logging.info(
+                    "Restored best model from epoch %d based on %s=%.4f",
+                    (best_epoch or 0) + 1,
+                    self.config.early_stop_metric,
+                    best_metric if best_metric is not None else float("nan"),
+                )
 
             for cb in self.callbacks:
                 cb.on_train_end(self)
