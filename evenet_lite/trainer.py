@@ -1092,6 +1092,15 @@ class Trainer:
             gathered_indices: List[Optional[torch.Tensor]] = [None for _ in range(self.world_size)]
             gathered_preds: List[Optional[torch.Tensor]] = [None for _ in range(self.world_size)]
 
+            if self.debug:
+                r = dist.get_rank()
+                logging.info("[Rank %d] Entering gather", r)
+                dist.barrier()
+
+                logging.info("rank=%s backend=%s preds_device=%s idx_device=%s",
+                             dist.get_rank(), dist.get_backend(),
+                             preds_tensor.device, index_tensor.device)
+
             dist.all_gather_object(gathered_indices, index_tensor)
             dist.all_gather_object(gathered_preds, preds_tensor)
 
