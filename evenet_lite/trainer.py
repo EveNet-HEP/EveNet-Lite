@@ -1093,8 +1093,12 @@ class Trainer:
             gathered_preds: List[Optional[torch.Tensor]] = [None for _ in range(self.world_size)]
 
             if self.debug:
+                if dist.get_rank() == 0:
+                    logging.info("default pg backend=%s world_size=%d", dist.get_backend(), dist.get_world_size())
+
                 r = dist.get_rank()
                 logging.info("[Rank %d] Before barrier", r)
+                torch.cuda.synchronize()
                 dist.barrier()
                 logging.info("[Rank %d] After barrier", r)
 
