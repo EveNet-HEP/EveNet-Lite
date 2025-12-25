@@ -254,6 +254,38 @@ def compute_sic_from_scores(
     }
 
 
+def find_score_at_min_bkg(
+        scores: np.ndarray,
+        targets: np.ndarray,
+        weights: Optional[np.ndarray],
+        min_bkg_events: float,
+) -> Optional[float]:
+    """Return score threshold where remaining bkg yield == min_bkg_events."""
+    bkg_mask = targets == 0
+
+    bkg_scores = scores[bkg_mask]
+    bkg_weights = weights[bkg_mask] if weights is not None else np.ones_like(bkg_scores)
+
+    if bkg_scores.size == 0:
+        return None
+
+    # Sort by score descending (tightest cut first)
+    order = np.argsort(-bkg_scores)
+    bkg_scores = bkg_scores[order]
+    bkg_weights = bkg_weights[order]
+
+    # Cumulative remaining background
+    cum_bkg = np.cumsum(bkg_weights)
+
+    # Find first point where we exceed min_bkg_events
+    idx = np.searchsorted(cum_bkg, min_bkg_events)
+
+    if idx >= len(bkg_scores):
+        return None
+
+    return bkg_scores[idx]
+
+
 def plot_sic_diagnostics(
         targets: np.ndarray,
         scores: np.ndarray,
@@ -354,11 +386,26 @@ def plot_sic_diagnostics(
     axs[1, 1].set_xlim(0.0, 1.0)
 
     if min_bkg_line_x is not None:
-        for ax in axs[:2, :2].flat:
-            ax.axvline(min_bkg_line_x, color="gray", linestyle="--", alpha=0.5, label=f"bkg={min_bkg_events:5d}")
+        score_cut = find_score_at_min_bkg(
+            scores=scores,
+            targets=targets,
+            weights=weights,
+            min_bkg_events=min_bkg_events,
+        )
+
+        if score_cut is not None:
+            axs[1, 1].axvline(
+                score_cut,
+                color="gray", linestyle="--", alpha=0.75, lw=2,
+                label=f"bkg = {min_bkg_events:g}",
+            )
+
+        for ax in [axs[0,0], axs[0,1], axs[1,0]]:
+            ax.axvline(min_bkg_line_x, color="gray", linestyle="--", alpha=0.75, lw=2, label=f"bkg={min_bkg_events:5d}")
         axs[0, 0].legend(loc="lower right")
         axs[0, 1].legend(loc="upper right")
         axs[1, 0].legend(loc="upper right")
+
 
     for ax in axs.flat:
         ax.grid(True, alpha=0.3)
