@@ -580,6 +580,7 @@ def run_pipeline(args):
         torch.cuda.set_device(local_rank)
     logger.info(f">>> Starting EveNet Training on GPU: {local_rank} [of World: {world_size}]")
 
+    start_time = time.time()
     classifier = run_evenet_lite_training(
         train_features=train_features,
         train_labels=d_train["y"],
@@ -621,6 +622,7 @@ def run_pipeline(args):
         n_ensemble=args.ensemble,
         loss_gamma=args.gamma
     )
+    end_time = time.time()
 
     # ---- evaluation data ----
     def is_rank_zero():
@@ -705,6 +707,7 @@ def run_pipeline(args):
             "auc": float(metrics["auc"]),
             "max_sic": float(metrics["max_sic"]),
             "max_sic_unc": float(metrics["max_sic_unc"]),
+            "fitting_time": end_time - start_time,
         }
         with open(out_dir / f"metrics_{key}.json", "w") as f:
             json.dump(results, f, indent=4)
