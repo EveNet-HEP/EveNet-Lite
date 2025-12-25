@@ -1010,8 +1010,8 @@ class Trainer:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         logging.info("Starting _collect_predictions")
-        logging.debug("Dataset size = %d", len(dataset))
-        logging.debug("Batch size = %d", batch_size)
+        logging.info("Dataset size = %d", len(dataset))
+        logging.info("Batch size = %d", batch_size)
 
         original_flag = getattr(dataset, "include_indices", False)
         dataset.include_indices = True
@@ -1025,12 +1025,13 @@ class Trainer:
             num_workers=self.config.num_workers,
         )
 
-        logging.debug(
-            "world_size=%d, sampler=%s, num_workers=%d",
-            self.world_size,
-            "DistributedSampler" if sampler else "None",
-            self.config.num_workers,
-        )
+        if self.debug:
+            logging.info(
+                "world_size=%d, sampler=%s, num_workers=%d",
+                self.world_size,
+                "DistributedSampler" if sampler else "None",
+                self.config.num_workers,
+            )
 
         self.model.to(self.device)
         self.model.eval()
@@ -1043,21 +1044,22 @@ class Trainer:
                 features, _, _, *maybe_idx = batch
                 batch_indices = maybe_idx[0] if maybe_idx else None
 
-                if step == 0:
-                    logging.debug("First batch received")
+                if step == 0 and self.debug:
+                    logging.info("First batch received")
                     if batch_indices is not None:
-                        logging.debug(
-                            "batch_indices shape=%s, min=%d, max=%d",
-                            tuple(batch_indices.shape),
-                            batch_indices.min().item(),
-                            batch_indices.max().item(),
-                        )
+                        if self.debug:
+                            logging.info(
+                                "batch_indices shape=%s, min=%d, max=%d",
+                                tuple(batch_indices.shape),
+                                batch_indices.min().item(),
+                                batch_indices.max().item(),
+                            )
 
                 features = self._prepare_features(features)
                 outputs = self._forward(self.model, features)
 
-                if step == 0:
-                    logging.debug("Raw outputs shape = %s", tuple(outputs.shape))
+                if step == 0 and self.debug:
+                    logging.info("Raw outputs shape = %s", tuple(outputs.shape))
 
                 # Ensemble case: [E, B, C] → [B, C]
                 outputs = outputs.mean(dim=0) if outputs.dim() == 3 else outputs
@@ -1076,11 +1078,12 @@ class Trainer:
             else torch.empty((0,), dtype=torch.long)
         )
 
-        logging.debug(
-            "Local outputs: preds=%s, indices=%s",
-            tuple(preds_tensor.shape),
-            tuple(index_tensor.shape),
-        )
+        if self.debug:
+            logging.info(
+                "Local outputs: preds=%s, indices=%s",
+                tuple(preds_tensor.shape),
+                tuple(index_tensor.shape),
+            )
 
         # ------------------------
         # DDP gather
@@ -1092,21 +1095,22 @@ class Trainer:
             dist.all_gather_object(gathered_indices, index_tensor)
             dist.all_gather_object(gathered_preds, preds_tensor)
 
-            if logging.isEnabledFor(logging.DEBUG):
+            if self.debug:
                 sizes = [
                     gi.shape if gi is not None else None
                     for gi in gathered_indices
                 ]
-                logging.debug("Gathered index shapes per rank = %s", sizes)
+                logging.info("Gathered index shapes per rank = %s", sizes)
 
             index_tensor = torch.cat([g for g in gathered_indices if g is not None], dim=0)
             preds_tensor = torch.cat([g for g in gathered_preds if g is not None], dim=0)
 
-            logging.debug(
-                "After gather: preds=%s, indices=%s",
-                tuple(preds_tensor.shape),
-                tuple(index_tensor.shape),
-            )
+            if self.debug:
+                logging.info(
+                    "After gather: preds=%s, indices=%s",
+                    tuple(preds_tensor.shape),
+                    tuple(index_tensor.shape),
+                )
 
             if index_tensor.numel() > 0:
                 order = torch.argsort(index_tensor)
@@ -1118,7 +1122,7 @@ class Trainer:
                 unique_positions = torch.nonzero(unique_mask, as_tuple=False).squeeze(1)
 
                 removed = index_tensor.numel() - unique_positions.numel()
-                logging.debug("Removed %d duplicated entries", removed)
+                logging.info("Removed %d duplicated entries", removed)
 
                 index_tensor = index_tensor[unique_positions]
                 preds_tensor = preds_tensor[unique_positions]

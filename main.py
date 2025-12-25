@@ -234,10 +234,10 @@ if __name__ == '__main__':
     clf.fit(
         train_data=(train_features, train_labels, None),
         val_data=(val_features, val_labels, val_weights),
-        # eval_data=(X_val, y_val, None),
+        eval_data=(val_features, val_labels, val_weights),
         # callbacks=[ParameterRandomizationCallback(min_values=[300, 500], max_values=[800, 1200])],
         callbacks=[],
-        epochs=10,
+        epochs=1,
         batch_size=128,
         sampler="weighted",  # or None
         epoch_size=1280,  # or None,
