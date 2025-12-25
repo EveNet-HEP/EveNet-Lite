@@ -156,7 +156,7 @@ def write_slurm_script(args: argparse.Namespace, signals: List[Tuple[str, str, s
         f"--pretrained-path \\\"{args.pretrained_path}\\\"",
         "--pretrained-source local",
         "--wandb-name \\\"${MASS_POINT}\\\"",
-        "--lr 1e-4,5e-5,1e-5",
+        "--lr 1e-4 5e-5 1e-5",
 
     ]
     if extra_args:
