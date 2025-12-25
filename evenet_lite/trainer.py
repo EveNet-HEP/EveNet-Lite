@@ -22,6 +22,49 @@ from .optim import (
 )
 
 
+def format_metrics_for_logging(
+        metrics: Dict[str, Any],
+        *,
+        exclude_keys: Optional[Iterable[str]] = None,
+        float_fmt: str = ".5f",
+) -> str:
+    """Format evaluation metrics for clean logging.
+
+    - Excludes selected keys
+    - Nicely formats scalars
+    - Summarizes non-scalars
+    """
+    exclude_keys = set(exclude_keys or [])
+
+    lines = []
+    for key in sorted(metrics.keys()):
+        if key in exclude_keys:
+            continue
+
+        val = metrics[key]
+
+        # Scalars
+        if isinstance(val, (int, float)):
+            lines.append(f"{key:>24s} : {val:{float_fmt}}")
+
+        # 0-dim tensors / numpy scalars
+        elif hasattr(val, "item") and callable(val.item):
+            try:
+                lines.append(f"{key:>24s} : {val.item():{float_fmt}}")
+            except Exception:
+                lines.append(f"{key:>24s} : <tensor>")
+
+        # Arrays / tensors
+        elif hasattr(val, "shape"):
+            lines.append(f"{key:>24s} : array{tuple(val.shape)}")
+
+        # Everything else
+        else:
+            lines.append(f"{key:>24s} : {type(val).__name__}")
+
+    return "\n".join(lines)
+
+
 @dataclass
 class TrainerConfig:
     device: str = "auto"
@@ -500,9 +543,9 @@ class Trainer:
                             for k, v in self._unwrap_model().state_dict().items()
                         }
                 elif (
-                    self.config.early_stop_patience > 0
-                    and best_metric is not None
-                    and metric_value is not None
+                        self.config.early_stop_patience > 0
+                        and best_metric is not None
+                        and metric_value is not None
                 ):
                     epochs_since_improve += 1
                     if epochs_since_improve >= self.config.early_stop_patience:
@@ -547,6 +590,21 @@ class Trainer:
                     logging.info(
                         "Evaluation finished for test split; metrics available under keys: %s",
                         ", ".join(sorted(eval_metrics.keys())),
+                    )
+
+                    allowed_keys = {
+                        "auc",
+                        "max_sic",
+                        "max_sic_unc",
+                        "accuracy",
+                        "loss",
+                    }
+
+                    logging.info(
+                        "Evaluation metrics (test split):\n%s",
+                        format_metrics_for_logging(
+                            {k: eval_metrics[k] for k in allowed_keys if k in eval_metrics},
+                        ),
                     )
         finally:
             self._finalize_training()
