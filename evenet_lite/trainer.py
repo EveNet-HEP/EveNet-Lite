@@ -1094,8 +1094,9 @@ class Trainer:
 
             if self.debug:
                 r = dist.get_rank()
-                logging.info("[Rank %d] Entering gather", r)
+                logging.info("[Rank %d] Before barrier", r)
                 dist.barrier()
+                logging.info("[Rank %d] After barrier", r)
 
                 logging.info("rank=%s backend=%s preds_device=%s idx_device=%s",
                              dist.get_rank(), dist.get_backend(),
