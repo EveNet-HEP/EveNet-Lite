@@ -269,7 +269,14 @@ class Trainer:
 
     def _load_model_state(self, state: Optional[Dict[str, torch.Tensor]]) -> None:
         if self.world_size > 1:
-            payload = [state]
+            # payload = [state]
+            # dist.broadcast_object_list(payload, src=0)
+            # state = payload[0]
+
+            payload = [None]
+            if dist.get_rank() == 0:
+                payload[0] = state  # must be CPU objects for object broadcast
+
             dist.broadcast_object_list(payload, src=0)
             state = payload[0]
         if state is None:
