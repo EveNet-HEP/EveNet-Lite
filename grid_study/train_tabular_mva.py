@@ -461,6 +461,8 @@ def run_pipeline(args):
     X_full = np.concatenate([d_bkg_tr['X'], d_sig_tr['X']])
     y_full = np.concatenate([d_bkg_tr['y'], d_sig_tr['y']])
     w_full = np.concatenate([d_bkg_tr['w'], d_sig_tr['w']])
+    
+    w_full = abs(w_full)
 
     if args.parameterize:
         m_full = np.concatenate([d_bkg_tr['m'], d_sig_tr['m']])
@@ -473,8 +475,6 @@ def run_pipeline(args):
 
     model = None
     start_time = time.time()
-
-    w_tr = abs(w_tr)  # Use absolute weights for training
 
     # positive_weight_mask = w_tr > 0
     #
