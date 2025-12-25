@@ -56,7 +56,8 @@ runner or your own loop; the only requirements are:
    global dimension (and update ``global_input_dim`` accordingly).
 2. Attach ``ParameterRandomizationCallback`` when fitting to resample background parameters each batch while
    leaving signal parameters intact. Optionally set ``min_values``/``max_values`` (one value or a list per
-   parameter); otherwise the callback infers bounds from the training set.
+   parameter); otherwise the callback infers bounds from the training set. Or set ``pool_from_signal`` to sample 
+   directly from signal pool (uniformly sampled from all discreted parameter combinations in the signal events).
 3. Keep validation randomization on (default) to match training, or set ``apply_to_validation=False`` if you
    prefer fixed parameters there. Evaluation is untouched.
 
@@ -172,6 +173,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `pretrained_source`                                                                       | `"hf"`                 | `"hf"` for Hugging Face hub or `"local"` for a provided path.                                  |
 | `pretrained_path` / `pretrained_repo_id` / `pretrained_filename` / `pretrained_cache_dir` | varies                 | Location details for pretrained checkpoints.                                                   |
 | `num_workers`                                                                             | 0                      | Number of processes passing to pytorch `DataLoader`                                              |
+| `loss_gamma`                                                                              | `0.0`                  | Focal-loss gamma (``0`` reduces to standard cross-entropy).                                    |
 
 ### `EvenetLiteClassifier.fit`
 
@@ -228,6 +230,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `eval_batch_size`                                                   | `None`                               | Batch size for evaluation (defaults to training batch size).       |
 | `sic_min_bkg_events`                                                | `100`                                | Minimum background events for SIC metric computation.              |
 | `debug`                                                             | `False`                              | Enables verbose debugging callback and sampler diagnostics.        |
+| `loss_gamma`                                                        | `0.0`                                | Focal-loss gamma (``0`` reduces to standard cross-entropy).        |
 | `log_level`                                                         | `logging.INFO`                       | Logging level set before runner diagnostics.                       |
 | `**classifier_kwargs`                                               | —                                    | Additional arguments forwarded directly to `EvenetLiteClassifier`. |
 
