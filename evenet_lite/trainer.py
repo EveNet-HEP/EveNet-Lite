@@ -525,6 +525,8 @@ class Trainer:
             for cb in self.callbacks:
                 cb.on_train_end(self)
 
+            logging.info("Training finished")
+
             if self.test_dataset is not None:
                 eval_batch_size = self.config.eval_batch_size or batch_size
                 eval_metrics = self.evaluate(
