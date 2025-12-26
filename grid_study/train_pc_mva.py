@@ -705,6 +705,8 @@ def run_pipeline(args):
             "auc": float(metrics["auc"]),
             "max_sic": float(metrics["max_sic"]),
             "max_sic_unc": float(metrics["max_sic_unc"]),
+            "sic": metrics["sic"].tolist(),
+            "sic_unc": metrics["sic_unc"].tolist(),
         }
         with open(out_dir / f"metrics_{key}.json", "w") as f:
             json.dump(results, f, indent=4)
