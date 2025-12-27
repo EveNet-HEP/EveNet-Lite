@@ -390,6 +390,11 @@ def run_pipeline(args):
     ckpt_dir = out_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
 
+    if args.in_dir is not None:
+        load_dir = Path(args.in_dir) / model_str / mode_str / mass_target
+    else:
+        load_dir = out_dir
+
     # ---- config & discovery ----
     cfg = ConfigLoader(args.yaml_path, args.base_dir)
     all_datasets = cfg.discover_datasets()
@@ -699,7 +704,7 @@ def run_pipeline(args):
                 if int(my_val) != int(args.mY):
                     continue
 
-            with open(out_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.json", "r") as f:
+            with open(load_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.json", "r") as f:
                 predict_value = json.load(f)
 
             if not is_rank_zero():
@@ -783,6 +788,7 @@ if __name__ == "__main__":
 
     # IO
     parser.add_argument("--out_dir", type=str, default="results")
+    parser.add_argument("--in_dir", type=str, default="results", help="input directory that differs from out_dir")
     parser.add_argument("--pretrain", action="store_true", help="Use pretrained model weights")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for training")
     parser.add_argument("--param-mx-step", type=int, default=1)
