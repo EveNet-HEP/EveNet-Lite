@@ -497,6 +497,7 @@ def calculate_physics_metrics(
         "sic": sic_result["sic"],
         "sic_unc": sic_result["sic_unc"],
         "edges": edges,
+        "trafo_edge": trafo_edge,
     }
 
     if log_plots:

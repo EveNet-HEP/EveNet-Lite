@@ -18,7 +18,7 @@ def trafoD_binning(test_data, test_label, test_weights, Zb, Zs, min_bkg_per_bin=
     - bin_edges: list of bin edges satisfying the TrafoD criteria.
     """
     # Initialize lists to store bin edges and statistics
-    bin_edges = []
+    bin_edges = [0]
     total_events = len(test_data)
     mc_threshold = 1 / (min_mc_stats ** 2)  # Minimum required events based on uncertainty
 
@@ -63,6 +63,7 @@ def trafoD_binning(test_data, test_label, test_weights, Zb, Zs, min_bkg_per_bin=
 
     # Add the last bin edge to cover all data
     bin_edges.append(data_sorted[-1])
+
 
     return bin_edges
 
