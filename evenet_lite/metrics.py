@@ -9,6 +9,7 @@ from scipy.special import expit, softmax
 
 from .transform_binning import binned_sig
 
+
 def _flatten_ensemble(
         logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -44,11 +45,11 @@ def _mean_ensemble_logits(logits: torch.Tensor) -> torch.Tensor:
 #     return per_sample.mean()
 
 def compute_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    weights: Optional[torch.Tensor],
-    gamma: float = 1.0,
-    eps: float = 1e-8,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        weights: Optional[torch.Tensor],
+        gamma: float = 1.0,
+        eps: float = 1e-8,
 ) -> torch.Tensor:
     logits, targets, weights = _flatten_ensemble(logits, targets, weights)
 
@@ -428,12 +429,11 @@ def plot_sic_diagnostics(
                 label=f"bkg = {min_bkg_events:g}",
             )
 
-        for ax in [axs[0,0], axs[0,1], axs[1,0]]:
+        for ax in [axs[0, 0], axs[0, 1], axs[1, 0]]:
             ax.axvline(min_bkg_line_x, color="gray", linestyle="--", alpha=0.75, lw=2, label=f"bkg={min_bkg_events:5d}")
         axs[0, 0].legend(loc="lower right")
         axs[0, 1].legend(loc="upper right")
         axs[1, 0].legend(loc="upper right")
-
 
     for ax in axs.flat:
         ax.grid(True, alpha=0.3)
@@ -455,6 +455,10 @@ def calculate_physics_metrics(
         log_step: Optional[int] = None,
         f_name: Optional[str] = None,
         min_bkg_ratio: Optional[float] = None,
+        Zs: int = 10,
+        Zb: int = 5,
+        min_bkg_per_bin: int = 3,
+        min_mc_stats: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
 
@@ -480,20 +484,20 @@ def calculate_physics_metrics(
         auc_val = 0.5
 
     trafo_edge, bin_sig = binned_sig(
-        test_data = scores,
-        test_label = targets,
-        test_weights = weights,
-        Zb=5,
-        Zs=10,
-        min_bkg_per_bin=3,
-        min_mc_stats=1.0,
+        test_data=scores,
+        test_label=targets,
+        test_weights=weights,
+        Zb=Zb,
+        Zs=Zs,
+        min_bkg_per_bin=min_bkg_per_bin,
+        min_mc_stats=min_mc_stats,
     )
 
     metrics = {
         "auc": float(auc_val),
         "max_sic": float(sic_result["max_sic"]),
         "max_sic_unc": float(sic_result["max_sic_unc"]),
-        "bin_sig": float(bin_sig),
+        "trafo_bin_sig": float(bin_sig),
         "sic": sic_result["sic"],
         "sic_unc": sic_result["sic_unc"],
         "edges": edges,
