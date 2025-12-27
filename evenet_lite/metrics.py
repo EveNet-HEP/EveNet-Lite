@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from scipy.special import expit, softmax
-from sklearn.metrics import roc_auc_score
 
+from .transform_binning import binned_sig
 
 def _flatten_ensemble(
         logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]
@@ -479,10 +479,21 @@ def calculate_physics_metrics(
     except ValueError:
         auc_val = 0.5
 
+    trafo_edge, bin_sig = binned_sig(
+        test_data = scores,
+        test_label = targets,
+        test_weights = weights,
+        Zb=5,
+        Zs=10,
+        min_bkg_per_bin=3,
+        min_mc_stats=1.0,
+    )
+
     metrics = {
         "auc": float(auc_val),
         "max_sic": float(sic_result["max_sic"]),
         "max_sic_unc": float(sic_result["max_sic_unc"]),
+        "bin_sig": float(bin_sig),
         "sic": sic_result["sic"],
         "sic_unc": sic_result["sic_unc"],
         "edges": edges,
