@@ -155,5 +155,6 @@ def binned_sig(
     print(f"Significance: {significances}")
     print(f"bkg: {background_counts}")
     print(f"signal: {signal_counts}")
+    print(f"edge: {bin_edges}")
 
     return bin_edges, sum(significances)
