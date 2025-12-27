@@ -70,10 +70,16 @@ def generate_shell_scripts(args):
 
     # 4. Open output files inside the Farm directory
     # ----------------------------------------------
-    filenames = {
+    filenames_raw = {
         "scratch": os.path.join(farm_dir, "run_scratch.sh"),
         "pretrain": os.path.join(farm_dir, "run_pretrain.sh"),
         "xgboost": os.path.join(farm_dir, "run_xgboost.sh")
+    }
+
+    filenames = {
+        f"{k}_{mode}": v.replace(".sh", f"_{mode}.sh")
+        for k, v in filenames_raw.items()
+        for mode in ["train", "predict", "evaluate"]
     }
 
     # Open all files
@@ -84,23 +90,81 @@ def generate_shell_scripts(args):
         f.write("#!/bin/bash\n\n")
 
     count = 0
-    for key in keys:
-        match = pattern.search(key)
-        if match:
-            mX = match.group(1)
-            mY = match.group(2)
+    for mode in ["train", "predict", "evaluate"]:
+        for key in keys:
+            match = pattern.search(key)
+            if match:
+                mX = match.group(1)
+                mY = match.group(2)
 
-            # --- Write Commands ---
-            # 1. Scratch
-            files["scratch"].write(base_cmd_pc.format(mX=mX, mY=mY) + "\n")
+                # --- Write Commands ---
+                # 1. Scratch
+                files[f"scratch_{mode}"].write(base_cmd_pc.format(mX=mX, mY=mY) + f" --stage {mode}\n")
 
-            # 2. Pretrain
-            files["pretrain"].write(base_cmd_pc.format(mX=mX, mY=mY) + " --pretrain\n")
+                # 2. Pretrain
+                files[f"pretrain_{mode}"].write(base_cmd_pc.format(mX=mX, mY=mY) + f" --pretrain --stage {mode}\n")
 
-            # 3. XGBoost
-            files["xgboost"].write(base_cmd_xgb.format(mX=mX, mY=mY) + "\n")
+                # 3. XGBoost
+                files[f"xgboost_{mode}"].write(base_cmd_xgb.format(mX=mX, mY=mY) + f" --stage {mode} \n")
 
-            count += 1
+                count += 1
+
+    with open(os.path.join(farm_dir, f"run_param_train_pretrain.sh"), "w") as f:
+        for num_sparse in [1, 2, 3, 4]:
+        # train
+            mX = 500 # deosn't matter
+            mY = 90 # deosn't matter
+            cmd = (base_cmd_pc.format(mX=mX, mY=mY) + f" --stage train --parameterize  --pretrain  --param-mx-step {num_sparse} --param-my-step {num_sparse} ")
+            cmd = cmd.replace("--epochs 20", "--epochs 40")
+            f.write(f'bash -c "source ../NERSC/export_DDP_vars.sh && {cmd}"\n')
+    with open(os.path.join(farm_dir, f"run_param_predict_pretrain.sh"), "w") as f:
+        # predict, eval
+        for num_sparse in [1, 2, 3, 4]:
+            for key in keys:
+                match = pattern.search(key)
+                if match:
+                    mX = match.group(1)
+                    mY = match.group(2)
+                    f.write(base_cmd_pc.format(mX=mX, mY=mY) + f" --stage predict --parameterize --pretrain  --param-mx-step {num_sparse} --param-my-step {num_sparse}\n")
+
+    with open(os.path.join(farm_dir, f"run_param_evaluate_pretrain.sh"), "w") as f:
+        # predict, eval
+        for num_sparse in [1, 2, 3, 4]:
+            for key in keys:
+                match = pattern.search(key)
+                if match:
+                    mX = match.group(1)
+                    mY = match.group(2)
+                    f.write(base_cmd_pc.format(mX=mX, mY=mY) + f" --stage evaluate --parameterize --pretrain --param-mx-step {num_sparse} --param-my-step {num_sparse}\n")
+
+    with open(os.path.join(farm_dir, f"run_param_train_scratch.sh"), "w") as f:
+        for num_sparse in [1, 2, 3, 4]:
+            # train
+            mX = 500  # deosn't matter
+            mY = 90  # deosn't matter
+            cmd = (base_cmd_pc.format(mX=mX, mY=mY) + f" --stage train --parameterize --param-mx-step {num_sparse} --param-my-step {num_sparse}")
+            cmd = cmd.replace("--epochs 20", "--epochs 40")
+            f.write(f'bash -c "source ../NERSC/export_DDP_vars.sh && {cmd}"\n')
+    with open(os.path.join(farm_dir, f"run_param_predict_scratch.sh"), "w") as f:
+        # predict, eval
+        for num_sparse in [1, 2, 3, 4]:
+            for key in keys:
+                match = pattern.search(key)
+                if match:
+                    mX = match.group(1)
+                    mY = match.group(2)
+                    f.write(base_cmd_pc.format(mX=mX, mY=mY) + f" --stage predict --parameterize --param-mx-step {num_sparse} --param-my-step {num_sparse}\n")
+
+    with open(os.path.join(farm_dir, f"run_param_evaluate_scratch.sh"), "w") as f:
+        # predict, eval
+        for num_sparse in [1, 2, 3, 4]:
+            for key in keys:
+                match = pattern.search(key)
+                if match:
+                    mX = match.group(1)
+                    mY = match.group(2)
+                    f.write(base_cmd_pc.format(mX=mX,
+                                                mY=mY) + f" --stage evaluate --parameterize --param-mx-step {num_sparse} --param-my-step {num_sparse}\n")
 
     # 5. Cleanup and Permissions
     # --------------------------
