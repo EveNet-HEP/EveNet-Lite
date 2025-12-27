@@ -381,8 +381,10 @@ def run_pipeline(args):
     if not HAS_EVENET:
         return
 
-    mode_str = "parametrized" if args.parameterize else "individual"
-    mode_str = f"{mode_str}_reduce_factor_x_{args.param_mx_step}_y_{args.param_my_step}"
+    if args.parameterize:
+        mode_str = f"parametrized_reduce_factor_x_{args.param_mx_step}_y_{args.param_my_step}"
+    else:
+        mode_str = "individual"
     mass_target = "All" if args.parameterize else f"MX-{args.mX}_MY-{args.mY}"
     model_str = "evenet-pretrain" if args.pretrain else "evenet-scratch"
     out_dir = Path(args.out_dir) / model_str / mode_str / mass_target
