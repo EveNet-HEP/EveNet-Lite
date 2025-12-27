@@ -720,11 +720,15 @@ def run_pipeline(args):
                 log_plots=True,
                 bins=1000,
                 min_bkg_ratio=0.0001,
-                f_name=out_dir / f"sic_plots_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.png"
+                f_name=str(out_dir / f"sic_plots_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.png"),
+                Zs=10,
+                Zb=5,
+                min_bkg_per_bin=3,
+                min_mc_stats=1.0,
             )
 
             key = f"MX-{int(round(mx_val))}_MY-{int(round(my_val))}"
-            logger.info(f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}")
+            logger.info(f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}, Bin SIG={metrics['trafo_bin_sig']:.4f}")
 
             # ---- plots ----
             plot_score_overlay(
@@ -735,11 +739,21 @@ def run_pipeline(args):
                 fname=out_dir / f"score_{key}.png",
             )
 
+            plot_score_overlay(
+                y_eval=y_eval,
+                y_pred=y_pred,
+                w_eval=w_eval,
+                p_eval=p_eval,
+                fname=out_dir / f"score_trafo_{key}.png",
+            )
+
+
             # ---- save metrics ----
             results = {
                 "auc": float(metrics["auc"]),
                 "max_sic": float(metrics["max_sic"]),
                 "max_sic_unc": float(metrics["max_sic_unc"]),
+                "trafo_bin_sig": float(metrics["trafo_bin_sig"]),
                 "sic": metrics["sic"].tolist(),
                 "sic_unc": metrics["sic_unc"].tolist(),
                 # "fitting_time": end_time - start_time,

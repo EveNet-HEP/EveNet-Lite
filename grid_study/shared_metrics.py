@@ -2,11 +2,12 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+
 # ==========================================
 # 3. Plotting Helpers (accept torch or numpy; convert internally)
 # ==========================================
 
-def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, fname=None):
+def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None):
     # Convert tensors to numpy for matplotlib
     if isinstance(y_eval, torch.Tensor): y_eval = y_eval.detach().cpu().numpy()
     if isinstance(y_pred, torch.Tensor): y_pred = y_pred.detach().cpu().numpy()
@@ -26,7 +27,12 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, fname=None):
             bkg_labels.append(proc)
 
     plt.figure(figsize=(10, 7))
-    bins = np.linspace(0, 1, 40)
+
+    if bins is None:
+        bins = np.linspace(0, 1, 40)
+    else:
+        if bins[-1] < 1.0:
+            bins[-1] = 1.0
 
     if bkg_data:
         plt.hist(
