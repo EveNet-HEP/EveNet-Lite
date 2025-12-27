@@ -152,4 +152,8 @@ def binned_sig(
     # Step 4: Calculate significance for each bin
     significances = calculate_binned_significance(signal_counts, background_counts, method=method)
 
+    print(f"Significance: {significances}")
+    print(f"bkg: {background_counts}")
+    print(f"signal: {signal_counts}")
+
     return bin_edges, sum(significances)
