@@ -751,6 +751,7 @@ def run_pipeline(args):
                 y_pred=y_pred,
                 w_eval=w_eval,
                 p_eval=p_eval,
+                bins=metrics['trafo_edge'],
                 fname=out_dir / f"score_trafo_{key}.png",
             )
 
