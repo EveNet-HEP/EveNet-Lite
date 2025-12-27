@@ -150,6 +150,7 @@ def compute_sic_from_scores(
         weights: np.ndarray,
         edges: np.ndarray,
         min_bkg_events: int = 10,
+        min_bkg_ratio: Optional[float] = None,
 ) -> Dict[str, np.ndarray]:
     """Compute SIC curve and related quantities on weighted scores.
 
@@ -227,7 +228,8 @@ def compute_sic_from_scores(
     bkg_yield = cum_bkg[idxs]
 
     # Valid region
-    valid = (bkg_eff > 0) & (bkg_yield >= min_bkg_events)
+    min_bkg_eff = 0.0 if min_bkg_ratio is None else min_bkg_ratio
+    valid = (bkg_eff > min_bkg_eff) & (bkg_yield >= min_bkg_events)
 
     # Full curves (without the minimum-background cut) for plotting
     bkg_rej_full = np.full_like(sig_eff, np.nan, dtype=float)
@@ -452,6 +454,7 @@ def calculate_physics_metrics(
         wandb_run: Optional[object] = None,
         log_step: Optional[int] = None,
         f_name: Optional[str] = None,
+        min_bkg_ratio: Optional[float] = None,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
 
@@ -467,7 +470,7 @@ def calculate_physics_metrics(
     edges = np.linspace(0, 1, bins + 1)
 
     sic_result = compute_sic_from_scores(
-        targets, scores, weights, edges, min_bkg_events=min_bkg_events
+        targets, scores, weights, edges, min_bkg_events=min_bkg_events, min_bkg_ratio=min_bkg_ratio
     )
 
     try:
