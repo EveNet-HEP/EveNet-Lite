@@ -46,7 +46,7 @@ def trafo60_binning(
     if edges_low is None:
         edges_low = np.linspace(0.0, 0.999, 1001)
     if edges_high is None:
-        edges_high = np.linspace(0.999, 1.001, 1001)
+        edges_high = np.linspace(0.999, 1.000, 1001)
 
     bin_edges = np.concatenate([edges_low[:-1], edges_high])
     nbins = len(bin_edges) - 1
