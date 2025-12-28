@@ -104,6 +104,9 @@ def trafo60_binning(
                 else sum_b >= min_mc_yield
             )
 
+            if pass_yield:
+                print(f"sum_b: {sum_b}, pass: {pass_mc}, yield: {pass_yield}")
+
             if pass_core and pass_mc and pass_yield:
                 passed = True
                 if dist < best_dist:
