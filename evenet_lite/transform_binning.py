@@ -208,7 +208,10 @@ def binned_sig(
     # Step 3: Calculate counts in each bin
     for i in range(len(bin_edges) - 1):
         # Select events within the bin range
-        bin_mask = (test_data >= bin_edges[i]) & (test_data < bin_edges[i + 1])
+        if i == len(bin_edges) - 1:
+            bin_mask = (test_data >= bin_edges[i]) & (test_data <= bin_edges[i + 1])
+        else:
+            bin_mask = (test_data >= bin_edges[i]) & (test_data < bin_edges[i + 1])
         bin_labels = test_label[bin_mask]
         bin_weights = test_weights[bin_mask]
 
