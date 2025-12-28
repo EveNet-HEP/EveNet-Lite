@@ -57,7 +57,6 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
                 y_pred[mask_signal],
                 bins=bins,
                 weights=w_eval[mask_signal],
-                density=True,
             )
             plt.step(
                 x,
