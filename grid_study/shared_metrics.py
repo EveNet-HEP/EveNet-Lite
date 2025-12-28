@@ -39,7 +39,7 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
 
         bottom = np.zeros_like(x, dtype=float)
         for data, weights, label in zip(bkg_data, bkg_weights, bkg_labels):
-            counts, _ = np.histogram(data, bins=bins, weights=weights, density=True)
+            counts, _ = np.histogram(data, bins=bins, weights=weights)
             plt.bar(
                 x,
                 counts,
@@ -57,7 +57,6 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
                 y_pred[mask_signal],
                 bins=bins,
                 weights=w_eval[mask_signal],
-                density=True,
             )
 
             x_edges = np.arange(len(sig_counts) + 1)
