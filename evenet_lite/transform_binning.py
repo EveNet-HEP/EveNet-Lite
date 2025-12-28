@@ -108,7 +108,7 @@ def trafo60_binning(
             )
 
             if pass_yield:
-                print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, pass: {pass_mc}, yield: {pass_yield}")
+                print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}")
 
             if pass_core and pass_mc and pass_yield:
                 passed = True
