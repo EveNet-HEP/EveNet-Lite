@@ -44,9 +44,9 @@ def trafo60_binning(
 
     # --- default fine binning ---
     if edges_low is None:
-        edges_low = np.linspace(0.0, 0.999, 1001)
+        edges_low = np.linspace(0.0, 0.999, 10001)
     if edges_high is None:
-        edges_high = np.linspace(0.999, 1.0, 1001)
+        edges_high = np.linspace(0.999, 1.0, 10001)
 
     bin_edges = np.concatenate([edges_low[:-1], edges_high])
     nbins = len(bin_edges) - 1
@@ -104,8 +104,8 @@ def trafo60_binning(
                 else sum_b >= min_mc_yield
             )
 
-            # if pass_yield:
-            #     print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}")
+            if pass_yield:
+                print(f"{j}): sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}, pass_mc: {pass_mc}, pass_core: {pass_core}")
 
             if pass_core and pass_mc and pass_yield:
                 passed = True
