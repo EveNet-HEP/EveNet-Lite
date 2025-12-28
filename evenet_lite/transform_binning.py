@@ -205,33 +205,17 @@ def binned_sig(
     )
 
     # Step 2: Initialize lists to store signal and background counts per bin
-    signal_counts = []
-    background_counts = []
-
-    # Step 3: Calculate counts in each bin
-    for i in range(len(bin_edges) - 1):
-        # Select events within the bin range
-        if i == len(bin_edges) - 1:
-            bin_mask = (test_data >= bin_edges[i]) & (test_data <= bin_edges[i + 1])
-        else:
-            bin_mask = (test_data >= bin_edges[i]) & (test_data < bin_edges[i + 1])
-        bin_labels = test_label[bin_mask]
-        bin_weights = test_weights[bin_mask]
-
-        # Sum weighted counts for signal and background
-        signal_counts.append(np.sum(bin_weights[bin_labels == 1]))
-        background_counts.append(np.sum(bin_weights[bin_labels == 0]))
-
-    # Convert lists to arrays
-    signal_counts = np.array(signal_counts) / reweight_factor
-    background_counts = np.array(background_counts)
+    is_bkg = test_label == 0
+    is_signal = test_label == 1
+    bkg_hist, _ = np.histogram(test_data[is_bkg], bins=bin_edges, weights=test_weights[is_bkg])
+    sig_hist, _ = np.histogram(test_data[is_signal], bins=bin_edges, weights=test_weights[is_signal])
 
     # Step 4: Calculate significance for each bin
-    significances = calculate_binned_significance(signal_counts, background_counts, method=method)
+    significances = calculate_binned_significance(sig_hist, bkg_hist, method=method)
 
     print(f"Significance: {significances}")
-    print(f"bkg: {background_counts}")
-    print(f"signal: {signal_counts}")
+    print(f"bkg: {bkg_hist}")
+    print(f"signal: {sig_hist}")
     print(f"edge: {bin_edges}")
 
     return bin_edges, sum(significances)
