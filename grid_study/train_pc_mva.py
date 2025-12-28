@@ -760,6 +760,7 @@ def run_pipeline(args):
                 w_eval=w_eval,
                 p_eval=p_eval,
                 bins=metrics['trafo_edge'],
+                uniform_bin_plot=True,
                 fname=out_dir / f"score_trafo_{key}.png",
             )
 
