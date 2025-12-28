@@ -13,7 +13,7 @@ def trafo60_binning(
     include_signal=False,
     *,
     logger: logging.Logger | None = None,
-    log_level=logging.INFO,
+    log_level=logging.WARNING,
     log_all_steps: bool = True,   # True = log every j step; False = throttle
     log_every: int = 20,           # if not log_all_steps, log every N j-steps
 ):
