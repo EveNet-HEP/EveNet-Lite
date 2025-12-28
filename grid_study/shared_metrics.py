@@ -57,13 +57,11 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
                 y_pred[mask_signal],
                 bins=bins,
                 weights=w_eval[mask_signal],
+                density=True,
             )
-
-            x_edges = np.arange(len(sig_counts) + 1)
-
             plt.step(
-                x_edges,
-                np.r_[sig_counts, sig_counts[-1]],
+                x,
+                sig_counts,
                 where="mid",
                 linewidth=2.5,
                 color="red",
