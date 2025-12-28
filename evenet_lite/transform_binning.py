@@ -293,14 +293,14 @@ def binned_sig(
                 f"{significances[i]:8.{precision}f}"
             )
 
-        log_binning_summary(
-            logger,
-            bin_edges,
-            sig_hist,
-            bkg_hist,
-            significances,
-            precision=4,
-            level="info",  # or "debug"
-        )
+    log_binning_summary(
+        logger,
+        bin_edges,
+        sig_hist,
+        bkg_hist,
+        significances,
+        precision=4,
+        level="info",  # or "debug"
+    )
 
     return bin_edges, sum(significances)
