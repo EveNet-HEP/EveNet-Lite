@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Dict, Optional, Tuple
 
@@ -462,6 +463,7 @@ def calculate_physics_metrics(
         include_signal_in_stat: bool = True,
         edges_low=None,
         edges_high=None,
+        logger: logging.Logger | None = None,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
 
@@ -497,6 +499,7 @@ def calculate_physics_metrics(
         include_signal=include_signal_in_stat,
         edges_low=edges_low,
         edges_high=edges_high,
+        logger=logger,
     )
 
     metrics = {

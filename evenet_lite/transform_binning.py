@@ -1,24 +1,25 @@
 import numpy as np
 import logging
 
-logger = logging.getLogger("trafo60")
+logger = logging.getLogger("AutoBin")
+
 
 def trafo60_binning(
-    scores, labels, weights,
-    Zb, Zs,
-    edges_low=None,
-    edges_high=None,
-    min_mc_yield=10.0,
-    mc_stat_bound=0.5,
-    include_signal=False,
-    *,
-    logger: logging.Logger | None = None,
-    log_level=logging.WARNING,
-    log_all_steps: bool = True,   # True = log every j step; False = throttle
-    log_every: int = 20,           # if not log_all_steps, log every N j-steps
+        scores, labels, weights,
+        Zb, Zs,
+        edges_low=None,
+        edges_high=None,
+        min_mc_yield=10.0,
+        mc_stat_bound=0.5,
+        include_signal=False,
+        *,
+        logger: logging.Logger | None = None,
+        log_level=logging.WARNING,
+        log_all_steps: bool = True,  # True = log every j step; False = throttle
+        log_every: int = 20,  # if not log_all_steps, log every N j-steps
 ):
     if logger is None:
-        logger = logging.getLogger("trafo60")
+        logger = logging.getLogger("AutoBin")
     logger.setLevel(log_level)
 
     # --- default fine binning ---
@@ -67,7 +68,7 @@ def trafo60_binning(
         passed = False
 
         j = i
-        logger.info("---- new target (right edge) i=%d | score_high=%.6f", i, float(bin_edges[i+1]))
+        logger.info("---- new target (right edge) i=%d | score_high=%.6f", i, float(bin_edges[i + 1]))
 
         while j >= 0:
             sum_b += float(bkg_hist[j])
@@ -78,7 +79,7 @@ def trafo60_binning(
             rel_mc_stat = (bkg_unc / sum_b) if sum_b > 0 else np.inf
 
             if (sum_b + sum_s) <= 0:
-                j -=1
+                j -= 1
                 continue
 
             # Trafo-D core
@@ -112,7 +113,7 @@ def trafo60_binning(
                     "err2Rel=%.4f sqrt=%.4f dist=%.4f | pass(core=%s mc=%s yield=%s) ok=%s | "
                     "packed(S=%.6g B=%.6g Bunc=%.6g)",
                     i, j,
-                    float(bin_edges[j]), float(bin_edges[i+1]),
+                    float(bin_edges[j]), float(bin_edges[i + 1]),
                     sum_s, sum_b, bkg_unc, rel_mc_stat,
                     err2Rel, np.sqrt(err2Rel), dist,
                     pass_core, pass_mc, pass_yield, ok,
@@ -134,17 +135,17 @@ def trafo60_binning(
             j -= 1
 
         if not passed:
-            logger.warning(
-                "FAILED to find a valid bin for i=%d. Stopping. (Try loosening min_mc_yield/mc_stat_bound or check inputs.)",
+            logger.info(
+                "FAILED to find a valid bin for i=%d. Stopping.",
                 i
             )
             break
 
         # finalize this merged bin: [best_j, i]
         # compute finalized sums precisely from hists (robust)
-        fin_b = float(bkg_hist[best_j:i+1].sum())
-        fin_s = float(sig_hist[best_j:i+1].sum())
-        fin_err2 = float(bkg_w2_hist[best_j:i+1].sum())
+        fin_b = float(bkg_hist[best_j:i + 1].sum())
+        fin_s = float(sig_hist[best_j:i + 1].sum())
+        fin_err2 = float(bkg_w2_hist[best_j:i + 1].sum())
 
         packed_b += fin_b
         packed_s += fin_s
@@ -154,7 +155,7 @@ def trafo60_binning(
             "FINAL bin: idx [%d..%d] | edge=[%.6f, %.6f] | S=%.6g B=%.6g Bunc=%.6g | "
             "packed: S=%.6g/%.6g B=%.6g/%.6g (fracB=%.3f fracS=%.3f)",
             best_j, i,
-            float(bin_edges[best_j]), float(bin_edges[i+1]),
+            float(bin_edges[best_j]), float(bin_edges[i + 1]),
             fin_s, fin_b, np.sqrt(fin_err2),
             packed_s, N_s, packed_b, N_b,
             (packed_b / N_b) if N_b > 0 else np.nan,
@@ -181,6 +182,7 @@ def trafo60_binning(
     )
 
     return final_edges
+
 
 def calculate_binned_significance(N_sig, N_bkg, method="asimov"):
     """
@@ -222,6 +224,7 @@ def binned_sig(
         test_data, test_label, test_weights,
         Zb=5, Zs=10, min_bkg_per_bin=3, min_mc_stats=1.0, method="asimov",
         reweight_factor=1, include_signal=True, edges_low=None, edges_high=None,
+        logger: logging.Logger | None = None,
 ):
     """
     Calculate the binned significance based on Transformation D binning.
@@ -246,7 +249,8 @@ def binned_sig(
         edges_high=edges_high,
         min_mc_yield=min_bkg_per_bin,
         mc_stat_bound=min_mc_stats,
-        include_signal=include_signal
+        include_signal=include_signal,
+        logger=logger,
     )
 
     # Step 2: Initialize lists to store signal and background counts per bin
@@ -258,28 +262,45 @@ def binned_sig(
     # Step 4: Calculate significance for each bin
     significances = calculate_binned_significance(sig_hist, bkg_hist, method=method)
 
-    print(bin_edges)
-    print(significances)
+    def log_binning_summary(
+            logger,
+            bin_edges,
+            sig_hist,
+            bkg_hist,
+            significances,
+            precision=3,
+            level="info",
+    ):
+        if logger is None:
+            logger = logging.getLogger("AutoBin")
 
-    def print_binning_summary(bin_edges, sig_hist, bkg_hist, significances, precision=3):
+        log = getattr(logger, level)
+
         header = (
             f"{'bin':>3} | {'low':>8} {'high':>8} | "
             f"{'signal':>10} {'bkg':>10} | {'Z':>8}"
         )
-        print(header)
-        print("-" * len(header))
+        sep = "-" * len(header)
+
+        log(header)
+        log(sep)
 
         for i in range(len(sig_hist)):
-            print(
+            log(
                 f"{i:3d} | "
                 f"{bin_edges[i]:8.{precision}f} {bin_edges[i + 1]:8.{precision}f} | "
                 f"{sig_hist[i]:10.{precision}f} {bkg_hist[i]:10.{precision}f} | "
                 f"{significances[i]:8.{precision}f}"
             )
 
-    # usage
-    print_binning_summary(bin_edges, sig_hist, bkg_hist, significances)
-
-
+        log_binning_summary(
+            logger,
+            bin_edges,
+            sig_hist,
+            bkg_hist,
+            significances,
+            precision=4,
+            level="info",  # or "debug"
+        )
 
     return bin_edges, sum(significances)
