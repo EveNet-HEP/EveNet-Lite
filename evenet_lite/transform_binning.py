@@ -77,6 +77,10 @@ def trafo60_binning(
             bkg_unc = np.sqrt(err2_b)
             rel_mc_stat = (bkg_unc / sum_b) if sum_b > 0 else np.inf
 
+            if (sum_b + sum_s) <= 0:
+                j -=1
+                continue
+
             # Trafo-D core
             denom = 0.0
             if sum_b > 0 and N_b > 0:
