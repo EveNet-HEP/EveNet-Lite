@@ -400,9 +400,6 @@ def run_pipeline(args):
     cfg = ConfigLoader(args.yaml_path, args.base_dir)
     all_datasets = cfg.discover_datasets()
 
-    for d in all_datasets:
-        print(d)
-
     if args.parameterize:
         if args.param_mx_step is not None and args.param_my_step is not None:
             # Filter signal datasets based on step size
