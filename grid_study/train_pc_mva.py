@@ -771,7 +771,7 @@ def run_pipeline(args):
                 "trafo_bin_sig": float(metrics["trafo_bin_sig"]),
                 "sic": metrics["sic"].tolist(),
                 "sic_unc": metrics["sic_unc"].tolist(),
-                "trafo_edge": metrics["trafo_edge"],
+                "trafo_edge": metrics["trafo_edge"].to_list(),
                 # "fitting_time": end_time - start_time,
             }
             with open(out_dir / f"eval_metrics_{key}.json", "w") as f:

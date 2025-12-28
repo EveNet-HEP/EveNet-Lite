@@ -121,8 +121,11 @@ def trafo60_binning(
 
     # --- convert bin indices → score edges ---
     rebin_edges = sorted(set(rebin_edges))
+    print(f"rebin edges: {rebin_edges}")
     final_edges = [bin_edges[idx] for idx in rebin_edges if idx < len(bin_edges)]
+    print(f"final edges: {final_edges}")
     final_edges.append(bin_edges[-1])
+    print(f"final edges 2: {final_edges}")
 
     return np.array(final_edges)
 
@@ -220,6 +223,5 @@ def binned_sig(
     print(f"bkg: {background_counts}")
     print(f"signal: {signal_counts}")
     print(f"edge: {bin_edges}")
-    print(f"weights: {test_weights[:50]}")
 
     return bin_edges, sum(significances)
