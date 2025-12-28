@@ -64,7 +64,7 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
             plt.step(
                 x_edges,
                 np.r_[sig_counts, sig_counts[-1]],
-                where="post",
+                where="mid",
                 linewidth=2.5,
                 color="red",
                 label="Signal",
