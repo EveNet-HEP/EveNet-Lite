@@ -18,6 +18,7 @@ import torch.distributed as dist
 try:
     from evenet_lite import run_evenet_lite_training, EvenetLiteClassifier
     from evenet_lite.callbacks import ParameterRandomizationCallback
+
     HAS_EVENET = True
 
 except ImportError as e:
@@ -194,7 +195,7 @@ class EveNetDatasetManager:
             datasets: List[DatasetInfo],
             split: str = "train",
             target_masses: Optional[np.ndarray] = None,
-            lumi:float = 1.0
+            lumi: float = 1.0
     ) -> Dict[str, Any]:
         """
         Loads .pt files for EveNet.
@@ -260,7 +261,9 @@ class EveNetDatasetManager:
                     #     phys_w = phys_w.abs()
 
                     # --- labels ---
-                    y = torch.ones(N, dtype=torch.float32, device="cpu") if ds.is_signal else torch.zeros(N, dtype=torch.float32, device="cpu")
+                    y = torch.ones(N, dtype=torch.float32, device="cpu") if ds.is_signal else torch.zeros(N,
+                                                                                                          dtype=torch.float32,
+                                                                                                          device="cpu")
 
                     # --- mass injection: make [N, 2] float32 ---
                     if ds.is_signal:
@@ -348,6 +351,55 @@ class EveNetDatasetManager:
         return data
 
 
+# ==========================================
+# 3. Plotting Helpers (accept torch or numpy; convert internally)
+# ==========================================
+
+def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, fname=None):
+    # Convert tensors to numpy for matplotlib
+    if isinstance(y_eval, torch.Tensor): y_eval = y_eval.detach().cpu().numpy()
+    if isinstance(y_pred, torch.Tensor): y_pred = y_pred.detach().cpu().numpy()
+    if isinstance(w_eval, torch.Tensor): w_eval = w_eval.detach().cpu().numpy()
+
+    mask_signal = (y_eval == 1)
+    mask_bkg = (y_eval == 0)
+
+    bkg_processes = np.unique(p_eval[mask_bkg])
+    bkg_data, bkg_weights, bkg_labels = [], [], []
+
+    for proc in bkg_processes:
+        mask_proc = (p_eval == proc) & mask_bkg
+        if np.sum(mask_proc) > 0:
+            bkg_data.append(y_pred[mask_proc])
+            bkg_weights.append(w_eval[mask_proc])
+            bkg_labels.append(proc)
+
+    plt.figure(figsize=(10, 7))
+    bins = np.linspace(0, 1, 40)
+
+    if bkg_data:
+        plt.hist(
+            bkg_data, bins=bins, weights=bkg_weights, stacked=True,
+            label=bkg_labels, alpha=0.7, edgecolor="white", linewidth=0.3,
+            density=True, log=True
+        )
+
+    if np.sum(mask_signal) > 0:
+        plt.hist(
+            y_pred[mask_signal], bins=bins, weights=w_eval[mask_signal],
+            histtype="step", linewidth=2.5, color="red", label="Signal",
+            density=True, log=True
+        )
+
+    plt.xlabel("Score ($y_{pred}$)")
+    plt.ylabel("Weighted Events")
+    plt.title("Score Distribution (EveNet)")
+    plt.legend(loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=3)
+    plt.grid(axis="y", linestyle="--", alpha=0.3)
+
+    if fname:
+        plt.savefig(fname)
+        plt.close()
 
 # ==========================================
 # 4. Execution Flow
@@ -377,14 +429,21 @@ def run_pipeline(args):
     if not HAS_EVENET:
         return
 
-    mode_str = "parametrized" if args.parameterize else "individual"
-    mode_str = f"{mode_str}_reduce_factor_x_{args.param_mx_step}_y_{args.param_my_step}"
+    if args.parameterize:
+        mode_str = f"parametrized_reduce_factor_x_{args.param_mx_step}_y_{args.param_my_step}"
+    else:
+        mode_str = "individual"
     mass_target = "All" if args.parameterize else f"MX-{args.mX}_MY-{args.mY}"
     model_str = "evenet-pretrain" if args.pretrain else "evenet-scratch"
     out_dir = Path(args.out_dir) / model_str / mode_str / mass_target
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
+
+    if args.in_dir is not None:
+        load_dir = Path(args.in_dir) / model_str / mode_str / mass_target
+    else:
+        load_dir = out_dir
 
     # ---- config & discovery ----
     cfg = ConfigLoader(args.yaml_path, args.base_dir)
@@ -570,7 +629,7 @@ def run_pipeline(args):
             use_wandb=True,
             wandb = {
                 'project': 'EveNet-GridSearch',
-                'name': f"{model_str}-{mode_str}-{mass_target}",
+                'name': f"{model_str}-{mode_str}-{mass_target}{'-test' if args.wandb_test else ''}",
                 'entity': "ytchou97-university-of-washington",
                 'save_dir':"/pscratch/sd/t/tihsu/tmp/wandb"
             },
@@ -695,7 +754,7 @@ def run_pipeline(args):
                 if int(my_val) != int(args.mY):
                     continue
 
-            with open(out_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.json", "r") as f:
+            with open(load_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.json", "r") as f:
                 predict_value = json.load(f)
 
             if not is_rank_zero():
@@ -716,11 +775,15 @@ def run_pipeline(args):
                 log_plots=True,
                 bins=1000,
                 min_bkg_ratio=0.0001,
-                f_name=out_dir / f"sic_plots_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.png"
+                f_name=str(out_dir / f"sic_plots_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.png"),
+                Zs=10,
+                Zb=5,
+                min_bkg_per_bin=3,
+                min_mc_stats=1.0,
             )
 
             key = f"MX-{int(round(mx_val))}_MY-{int(round(my_val))}"
-            logger.info(f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}")
+            logger.info(f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}, Bin SIG={metrics['trafo_bin_sig']:.4f}")
 
             # ---- plots ----
             plot_score_overlay(
@@ -731,11 +794,25 @@ def run_pipeline(args):
                 fname=out_dir / f"score_{key}.png",
             )
 
+            plot_score_overlay(
+                y_eval=y_eval,
+                y_pred=y_pred,
+                w_eval=w_eval,
+                p_eval=p_eval,
+                bins=metrics['trafo_edge'],
+                fname=out_dir / f"score_trafo_{key}.png",
+            )
+
+
             # ---- save metrics ----
             results = {
                 "auc": float(metrics["auc"]),
                 "max_sic": float(metrics["max_sic"]),
                 "max_sic_unc": float(metrics["max_sic_unc"]),
+                "trafo_bin_sig": float(metrics["trafo_bin_sig"]),
+                "sic": metrics["sic"].tolist(),
+                "sic_unc": metrics["sic_unc"].tolist(),
+                "trafo_edge": metrics["trafo_edge"],
                 # "fitting_time": end_time - start_time,
             }
             with open(out_dir / f"eval_metrics_{key}.json", "w") as f:
@@ -763,6 +840,7 @@ if __name__ == "__main__":
 
     # IO
     parser.add_argument("--out_dir", type=str, default="results")
+    parser.add_argument("--in_dir", type=str, default="results", help="input directory that differs from out_dir")
     parser.add_argument("--pretrain", action="store_true", help="Use pretrained model weights")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for training")
     parser.add_argument("--param-mx-step", type=int, default=1)
@@ -773,6 +851,10 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=1.0, help="gamma for focal loss" )
 
     parser.add_argument("--stage", type=str, default=["train", "predict", "evaluate"], nargs="+", help="Pipeline stages to run")
+
+    # logging
+    parser.add_argument("--wandb_test", action="store_true")
+
     args = parser.parse_args()
 
     if not args.parameterize and (args.mX is None or args.mY is None):
