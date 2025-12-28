@@ -720,7 +720,9 @@ def run_pipeline(args):
             w_eval = np.array(predict_value["w"])
             p_eval = np.array(predict_value["proc"])
 
-            print(p_eval[:10])
+            nevents_by_name = {ds.name: ds.nevents for ds in all_datasets}
+            nevents_eval = np.array([nevents_by_name[p] for p in p_eval])
+            w_eval = w_eval / nevents_eval
 
             mx = predict_value["mx"]
             my = predict_value["my"]
