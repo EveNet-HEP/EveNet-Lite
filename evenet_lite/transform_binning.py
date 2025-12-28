@@ -204,6 +204,9 @@ def binned_sig(
     # Step 4: Calculate significance for each bin
     significances = calculate_binned_significance(sig_hist, bkg_hist, method=method)
 
+    print(bin_edges)
+    print(significances)
+
     def print_binning_summary(bin_edges, sig_hist, bkg_hist, significances, precision=3):
         header = (
             f"{'bin':>3} | {'low':>8} {'high':>8} | "

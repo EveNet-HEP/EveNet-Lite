@@ -754,15 +754,15 @@ def run_pipeline(args):
                 fname=out_dir / f"score_{key}.png",
             )
 
-            plot_score_overlay(
-                y_eval=y_eval,
-                y_pred=y_pred,
-                w_eval=w_eval,
-                p_eval=p_eval,
-                bins=metrics['trafo_edge'],
-                uniform_bin_plot=True,
-                fname=out_dir / f"score_trafo_{key}.png",
-            )
+            # plot_score_overlay(
+            #     y_eval=y_eval,
+            #     y_pred=y_pred,
+            #     w_eval=w_eval,
+            #     p_eval=p_eval,
+            #     bins=metrics['trafo_edge'],
+            #     uniform_bin_plot=True,
+            #     fname=out_dir / f"score_trafo_{key}.png",
+            # )
 
             # ---- save metrics ----
             results = {
