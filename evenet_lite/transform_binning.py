@@ -14,7 +14,7 @@ def trafo60_binning(
         include_signal=False,
         *,
         logger: logging.Logger | None = None,
-        log_level=logging.WARNING,
+        log_level=logging.INFO,
         log_all_steps: bool = True,  # True = log every j step; False = throttle
         log_every: int = 20,  # if not log_all_steps, log every N j-steps
 ):
@@ -43,7 +43,7 @@ def trafo60_binning(
     N_b = float(bkg_hist.sum())
     N_s = float(sig_hist.sum())
 
-    logger.info(
+    logger.debug(
         "Trafo60 start | nbins=%d | N_b=%.6g N_s=%.6g | min_mc_yield=%.6g mc_stat_bound=%.6g include_signal=%s | Zb=%.6g Zs=%.6g",
         nbins, N_b, N_s, float(min_mc_yield), float(mc_stat_bound), include_signal, float(Zb), float(Zs)
     )
@@ -68,7 +68,7 @@ def trafo60_binning(
         passed = False
 
         j = i
-        logger.info("---- new target (right edge) i=%d | score_high=%.6f", i, float(bin_edges[i + 1]))
+        logger.debug("---- new target (right edge) i=%d | score_high=%.6f", i, float(bin_edges[i + 1]))
 
         while j >= 0:
             sum_b += float(bkg_hist[j])
@@ -108,7 +108,7 @@ def trafo60_binning(
             step_counter += 1
             do_log = log_all_steps or (step_counter % log_every == 0) or ok
             if do_log:
-                logger.info(
+                logger.debug(
                     "i=%d j=%d | edge=[%.6f, %.6f] | S=%.6g B=%.6g Bunc=%.6g relMC=%.4f | "
                     "err2Rel=%.4f sqrt=%.4f dist=%.4f | pass(core=%s mc=%s yield=%s) ok=%s | "
                     "packed(S=%.6g B=%.6g Bunc=%.6g)",
@@ -126,7 +126,7 @@ def trafo60_binning(
                     best_dist = dist
                     best_j = j
                 else:
-                    logger.info(
+                    logger.debug(
                         "stop scan (distance worsened) at i=%d j=%d | best_j=%s best_dist=%.4f current_dist=%.4f",
                         i, j, str(best_j), best_dist, dist
                     )
@@ -135,7 +135,7 @@ def trafo60_binning(
             j -= 1
 
         if not passed:
-            logger.info(
+            logger.debug(
                 "FAILED to find a valid bin for i=%d. Stopping.",
                 i
             )
@@ -151,7 +151,7 @@ def trafo60_binning(
         packed_s += fin_s
         packed_err2_b += fin_err2
 
-        logger.info(
+        logger.debug(
             "FINAL bin: idx [%d..%d] | edge=[%.6f, %.6f] | S=%.6g B=%.6g Bunc=%.6g | "
             "packed: S=%.6g/%.6g B=%.6g/%.6g (fracB=%.3f fracS=%.3f)",
             best_j, i,
@@ -174,7 +174,7 @@ def trafo60_binning(
     final_edges = np.array(final_edges, dtype=float)
 
     # summary
-    logger.info(
+    logger.debug(
         "Trafo60 done | n_final_bins=%d | packed totals: S=%.6g/%.6g B=%.6g/%.6g",
         len(final_edges) - 1,
         packed_s, N_s,
