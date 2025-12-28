@@ -476,7 +476,6 @@ def run_pipeline(args):
     global_dim = train_features["globals"].shape[1]
     if args.parameterize:
         global_dim += train_features["params"].shape[1]
-    print("global_dim", global_dim)
 
     # ---- feature names ----
     feature_names = {

@@ -101,6 +101,8 @@ def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, bins=None, fname=None, un
     plt.legend(loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=3)
     plt.grid(axis="y", linestyle="--", alpha=0.3)
 
+    plt.ylim(plt.ylim()[0], plt.ylim()[1] * 10)
+
     if fname:
         plt.savefig(fname)
         plt.close()
