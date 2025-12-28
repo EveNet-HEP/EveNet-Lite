@@ -69,9 +69,6 @@ def trafo60_binning(
     rebin_edges = [nbins]
     i = nbins - 1
 
-    print(bkg_hist[-5:])
-    print(sig_hist[-5:])
-
     while i >= 0:
         sum_b = sum_s = err2_b = 0.0
         best_dist = np.inf
@@ -107,8 +104,8 @@ def trafo60_binning(
                 else sum_b >= min_mc_yield
             )
 
-            if pass_yield:
-                print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}")
+            # if pass_yield:
+            #     print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}")
 
             if pass_core and pass_mc and pass_yield:
                 passed = True
@@ -130,6 +127,9 @@ def trafo60_binning(
     final_edges = [bin_edges[idx] for idx in rebin_edges if idx < len(bin_edges)]
     if final_edges[-1] < bin_edges[-1]:
         final_edges.append(bin_edges[-1])
+
+    print(rebin_edges)
+    print(final_edges)
 
     return np.array(final_edges)
 
