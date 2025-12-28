@@ -723,7 +723,7 @@ def run_pipeline(args):
             w_eval = np.array(predict_value["w"])
             p_eval = np.array(predict_value["proc"])
 
-            nevents_by_name = {ds.category: ds.nevents for ds in all_datasets if ds.category != 'signal'}
+            nevents_by_name = {ds.category: ds.nevents if ds.category != 'signal' else 1.0 for ds in all_datasets }
             nevents_eval = np.array([nevents_by_name[p] for p in p_eval])
             w_eval = w_eval / nevents_eval
 
