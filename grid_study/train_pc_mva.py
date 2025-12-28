@@ -738,7 +738,8 @@ def run_pipeline(args):
                 Zs=10,
                 Zb=5,
                 min_bkg_per_bin=3,
-                min_mc_stats=1.0,
+                min_mc_stats=0.2,
+                include_signal_in_stat=False,
             )
 
             key = f"MX-{int(round(mx_val))}_MY-{int(round(my_val))}"
