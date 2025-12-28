@@ -107,7 +107,7 @@ def trafo60_binning(
                 else sum_b >= min_mc_yield
             )
 
-            if pass_yield and j > nbins - 25:
+            if pass_yield:
                 print(f"{j}): bkg = {bkg_hist[j]} sum_b: {sum_b}, passed: {passed}, yield: {pass_yield}")
 
             if pass_core and pass_mc and pass_yield:
