@@ -720,6 +720,8 @@ def run_pipeline(args):
             w_eval = np.array(predict_value["w"])
             p_eval = np.array(predict_value["proc"])
 
+            print(p_eval[:10])
+
             mx = predict_value["mx"]
             my = predict_value["my"]
             # ---- metrics ----
