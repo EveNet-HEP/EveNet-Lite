@@ -110,7 +110,7 @@ class ConfigLoader:
                 path=target,
                 is_signal=False,
                 xsec=cfg.get('xsec', 1.0),
-                nevents=cfg.get('nEvents', 1.0),
+                nevents=cfg.get('nEvent', 1.0),
                 category=cfg.get("name", "background")
             ))
 
