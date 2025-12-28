@@ -204,4 +204,25 @@ def binned_sig(
     # Step 4: Calculate significance for each bin
     significances = calculate_binned_significance(sig_hist, bkg_hist, method=method)
 
+    def print_binning_summary(bin_edges, sig_hist, bkg_hist, significances, precision=3):
+        header = (
+            f"{'bin':>3} | {'low':>8} {'high':>8} | "
+            f"{'signal':>10} {'bkg':>10} | {'Z':>8}"
+        )
+        print(header)
+        print("-" * len(header))
+
+        for i in range(len(sig_hist)):
+            print(
+                f"{i:3d} | "
+                f"{bin_edges[i]:8.{precision}f} {bin_edges[i + 1]:8.{precision}f} | "
+                f"{sig_hist[i]:10.{precision}f} {bkg_hist[i]:10.{precision}f} | "
+                f"{significances[i]:8.{precision}f}"
+            )
+
+    # usage
+    print_binning_summary(bin_edges, sig_hist, bkg_hist, significances)
+
+
+
     return bin_edges, sum(significances)
