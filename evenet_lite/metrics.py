@@ -459,6 +459,9 @@ def calculate_physics_metrics(
         Zb: int = 5,
         min_bkg_per_bin: int = 3,
         min_mc_stats: float = 1.0,
+        include_signal_in_stat: bool = True,
+        edges_low=None,
+        edges_high=None,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
 
@@ -491,6 +494,9 @@ def calculate_physics_metrics(
         Zs=Zs,
         min_bkg_per_bin=min_bkg_per_bin,
         min_mc_stats=min_mc_stats,
+        include_signal=include_signal_in_stat,
+        edges_low=edges_low,
+        edges_high=edges_high,
     )
 
     metrics = {

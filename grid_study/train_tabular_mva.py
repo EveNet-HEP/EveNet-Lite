@@ -537,12 +537,18 @@ def run_pipeline(args):
 
             # D. Metrics
             metrics = calculate_physics_metrics(
-                y_pred, y_eval, w_eval,
-                False ,min_bkg_events=10,
+                y_pred, y_eval, w_eval, training=False,
+                min_bkg_events=10,
                 log_plots=True,
+                bins=1000,
                 min_bkg_ratio=0.0001,
-                f_name=f"{out_dir}/sic_MX-{int(mx)}_MY-{int(my)}.png"
+                f_name=f"{out_dir}/sic_MX-{int(mx)}_MY-{int(my)}.png",
+                Zs=10,
+                Zb=5,
+                min_bkg_per_bin=3,
+                min_mc_stats=1.0,
             )
+
             key = f"MX-{int(mx)}_MY-{int(my)}"
             results = {
                 "auc": float(metrics['auc']),
