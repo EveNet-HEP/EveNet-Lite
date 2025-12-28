@@ -69,6 +69,9 @@ def trafo60_binning(
     rebin_edges = [nbins]
     i = nbins - 1
 
+    print(bkg_hist[-5:])
+    print(sig_hist[-5:])
+
     while i >= 0:
         sum_b = sum_s = err2_b = 0.0
         best_dist = np.inf
