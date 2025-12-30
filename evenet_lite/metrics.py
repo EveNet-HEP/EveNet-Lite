@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Dict, Optional, Tuple
 
@@ -229,7 +230,8 @@ def compute_sic_from_scores(
     bkg_yield = cum_bkg[idxs]
 
     # Valid region
-    valid = (bkg_eff > 0) & (bkg_yield >= min_bkg_events)
+    min_bkg_eff = 0.0 if min_bkg_ratio is None else min_bkg_ratio
+    valid = (bkg_eff > min_bkg_eff) & (bkg_yield >= min_bkg_events)
 
     # Full curves (without the minimum-background cut) for plotting
     bkg_rej_full = np.full_like(sig_eff, np.nan, dtype=float)
@@ -428,12 +430,11 @@ def plot_sic_diagnostics(
                 label=f"bkg = {min_bkg_events:g}",
             )
 
-        for ax in [axs[0,0], axs[0,1], axs[1,0]]:
+        for ax in [axs[0, 0], axs[0, 1], axs[1, 0]]:
             ax.axvline(min_bkg_line_x, color="gray", linestyle="--", alpha=0.75, lw=2, label=f"bkg={min_bkg_events:5d}")
         axs[0, 0].legend(loc="lower right")
         axs[0, 1].legend(loc="upper right")
         axs[1, 0].legend(loc="upper right")
-
 
     for ax in axs.flat:
         ax.grid(True, alpha=0.3)
@@ -459,6 +460,10 @@ def calculate_physics_metrics(
         Zb: int = 5,
         min_bkg_per_bin: int = 3,
         min_mc_stats: float = 1.0,
+        include_signal_in_stat: bool = True,
+        edges_low=None,
+        edges_high=None,
+        logger: logging.Logger | None = None,
 ) -> Dict[str, np.ndarray]:
     """Calculates AUC and Max SIC with statistical uncertainty."""
 
@@ -491,6 +496,10 @@ def calculate_physics_metrics(
         Zs=Zs,
         min_bkg_per_bin=min_bkg_per_bin,
         min_mc_stats=min_mc_stats,
+        include_signal=include_signal_in_stat,
+        edges_low=edges_low,
+        edges_high=edges_high,
+        logger=logger,
     )
 
     metrics = {

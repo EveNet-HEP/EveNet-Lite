@@ -104,6 +104,7 @@ def filter_dict(data: dict, mask):
     """Alias for slice_data, but semantically used for boolean masks."""
     return slice_data(data, mask)
 
+
 @dataclass
 class DatasetInfo:
     name: str
@@ -170,7 +171,7 @@ class ConfigLoader:
                     path=folder,
                     is_signal=True,
                     xsec=1.0,
-                    nevents=184000, #TODO: make configurable, now hardcoded
+                    nevents=184000,  # TODO: make configurable, now hardcoded
                     mx=mx,
                     my=my,
                     category="signal"
@@ -352,56 +353,6 @@ class EveNetDatasetManager:
 
 
 # ==========================================
-# 3. Plotting Helpers (accept torch or numpy; convert internally)
-# ==========================================
-
-def plot_score_overlay(y_eval, y_pred, w_eval, p_eval, fname=None):
-    # Convert tensors to numpy for matplotlib
-    if isinstance(y_eval, torch.Tensor): y_eval = y_eval.detach().cpu().numpy()
-    if isinstance(y_pred, torch.Tensor): y_pred = y_pred.detach().cpu().numpy()
-    if isinstance(w_eval, torch.Tensor): w_eval = w_eval.detach().cpu().numpy()
-
-    mask_signal = (y_eval == 1)
-    mask_bkg = (y_eval == 0)
-
-    bkg_processes = np.unique(p_eval[mask_bkg])
-    bkg_data, bkg_weights, bkg_labels = [], [], []
-
-    for proc in bkg_processes:
-        mask_proc = (p_eval == proc) & mask_bkg
-        if np.sum(mask_proc) > 0:
-            bkg_data.append(y_pred[mask_proc])
-            bkg_weights.append(w_eval[mask_proc])
-            bkg_labels.append(proc)
-
-    plt.figure(figsize=(10, 7))
-    bins = np.linspace(0, 1, 40)
-
-    if bkg_data:
-        plt.hist(
-            bkg_data, bins=bins, weights=bkg_weights, stacked=True,
-            label=bkg_labels, alpha=0.7, edgecolor="white", linewidth=0.3,
-            density=True, log=True
-        )
-
-    if np.sum(mask_signal) > 0:
-        plt.hist(
-            y_pred[mask_signal], bins=bins, weights=w_eval[mask_signal],
-            histtype="step", linewidth=2.5, color="red", label="Signal",
-            density=True, log=True
-        )
-
-    plt.xlabel("Score ($y_{pred}$)")
-    plt.ylabel("Weighted Events")
-    plt.title("Score Distribution (EveNet)")
-    plt.legend(loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=3)
-    plt.grid(axis="y", linestyle="--", alpha=0.3)
-
-    if fname:
-        plt.savefig(fname)
-        plt.close()
-
-# ==========================================
 # 4. Execution Flow
 # ==========================================
 
@@ -459,7 +410,8 @@ def run_pipeline(args):
             mx_filtered = mx_sorted[::args.param_mx_step]
             my_filtered = my_sorted[::args.param_my_step]
             sig_datasets_eval = [d for d in all_datasets if d.is_signal]
-            sig_datasets_train = [d for d in all_datasets if d.is_signal and d.mx in mx_filtered and d.my in my_filtered]
+            sig_datasets_train = [d for d in all_datasets if
+                                  d.is_signal and d.mx in mx_filtered and d.my in my_filtered]
         else:
             sig_datasets_train = [d for d in all_datasets if d.is_signal]
             sig_datasets_eval = sig_datasets_train
@@ -524,7 +476,6 @@ def run_pipeline(args):
     global_dim = train_features["globals"].shape[1]
     if args.parameterize:
         global_dim += train_features["params"].shape[1]
-    print("global_dim", global_dim)
 
     # ---- feature names ----
     feature_names = {
@@ -542,8 +493,8 @@ def run_pipeline(args):
             min_vals = m_vals.min(dim=0).values.tolist()
             max_vals = m_vals.max(dim=0).values.tolist()
             logger.info(f"Adding ParameterRandomizationCallback: Min={min_vals}, Max={max_vals}")
-            callbacks.append(ParameterRandomizationCallback(min_values=min_vals, max_values=max_vals, pool_from_signal=True))
-
+            callbacks.append(
+                ParameterRandomizationCallback(min_values=min_vals, max_values=max_vals, pool_from_signal=True))
 
         ##########################
         ## Normalization Rules  ##
@@ -589,10 +540,11 @@ def run_pipeline(args):
                 "feature_1": "normalize"
             }
 
-
         learning_rate = args.learning_rate if hasattr(args, 'learning_rate') else 1e-3
-        learning_rates = [learning_rate] if not args.pretrain else [0.1 * learning_rate, 0.3 * learning_rate, learning_rate]
-        module_lists = [["Classification", "ObjectEncoder", "PET", "GlobalEmbedding"]] if not args.pretrain else [["PET"], ["ObjectEncoder",  "GlobalEmbedding"], ["Classification"]]
+        learning_rates = [learning_rate] if not args.pretrain else [0.1 * learning_rate, 0.3 * learning_rate,
+                                                                    learning_rate]
+        module_lists = [["Classification", "ObjectEncoder", "PET", "GlobalEmbedding"]] if not args.pretrain else [
+            ["PET"], ["ObjectEncoder", "GlobalEmbedding"], ["Classification"]]
         weight_decay = [1e-4 for x in learning_rates]
         # ---- train ----
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -623,21 +575,21 @@ def run_pipeline(args):
             checkpoint_path=str(ckpt_dir),
             save_top_k=1,
             monitor_metric="val_loss",
-            sic_min_bkg_events = 10,
-            normalization_rules = normalization_rules if args.parameterize else None,
-            normalization_stats = normalization_stats,
+            sic_min_bkg_events=10,
+            normalization_rules=normalization_rules if args.parameterize else None,
+            normalization_stats=normalization_stats,
             use_wandb=True,
-            wandb = {
+            wandb={
                 'project': 'EveNet-GridSearch',
                 'name': f"{model_str}-{mode_str}-{mass_target}{'-test' if args.wandb_test else ''}",
                 'entity': "ytchou97-university-of-washington",
-                'save_dir':"/pscratch/sd/t/tihsu/tmp/wandb"
+                'save_dir': "/pscratch/sd/t/tihsu/tmp/wandb"
             },
             pretrained=args.pretrain,
             pretrained_path="/global/cfs/cdirs/m5019/avencast/Checkpoints/checkpoints.20M.ablation.4.newcls/last.ckpt",
             pretrained_source="local",
-            module_lists = module_lists,
-            lr = learning_rates,
+            module_lists=module_lists,
+            lr=learning_rates,
             weight_decay=weight_decay,
             early_stop_patience=3,
             n_ensemble=args.ensemble,
@@ -646,7 +598,7 @@ def run_pipeline(args):
         end_time = time.time()
 
         fitting_time = end_time - start_time
-        logger.info(f"Training completed in {fitting_time/60:.2f} minutes.")
+        logger.info(f"Training completed in {fitting_time / 60:.2f} minutes.")
 
     predict_value = None
     if "predict" in args.stage:
@@ -662,10 +614,12 @@ def run_pipeline(args):
                 logger.error(f"No checkpoints found in {ckpt_dir} for prediction!")
                 raise SystemExit(1)
             best_ckpt = max(ckpt_files, key=os.path.getctime)
-            classifier.load_checkpoint(best_ckpt, feature_names =feature_names)
+            classifier.load_checkpoint(best_ckpt, feature_names=feature_names)
+
         # ---- evaluation data ----
         def is_rank_zero():
             return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+
         logger.info(">>> Loading Test Data...")
         d_sig_te = dm.load_data(sig_datasets_eval, "valid", lumi=args.lumi)
         # d_sig_te = dm.reweight_signals(d_sig_te, logger=logger)
@@ -765,6 +719,10 @@ def run_pipeline(args):
             w_eval = np.array(predict_value["w"])
             p_eval = np.array(predict_value["proc"])
 
+            nevents_by_name = {ds.category: ds.nevents if ds.category != 'signal' else 1.0 for ds in all_datasets }
+            nevents_eval = np.array([nevents_by_name[p] for p in p_eval])
+            w_eval = w_eval / nevents_eval
+
             mx = predict_value["mx"]
             my = predict_value["my"]
             # ---- metrics ----
@@ -779,11 +737,14 @@ def run_pipeline(args):
                 Zs=10,
                 Zb=5,
                 min_bkg_per_bin=3,
-                min_mc_stats=1.0,
+                min_mc_stats=0.2,
+                include_signal_in_stat=False,
+                # logger=logger,
             )
 
             key = f"MX-{int(round(mx_val))}_MY-{int(round(my_val))}"
-            logger.info(f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}, Bin SIG={metrics['trafo_bin_sig']:.4f}")
+            logger.info(
+                f"Mass {key}: AUC={metrics['auc']:.4f}, Max SIC={metrics['max_sic']:.4f}, Bin SIG={metrics['trafo_bin_sig']:.4f}")
 
             # ---- plots ----
             plot_score_overlay(
@@ -800,9 +761,9 @@ def run_pipeline(args):
                 w_eval=w_eval,
                 p_eval=p_eval,
                 bins=metrics['trafo_edge'],
+                uniform_bin_plot=True,
                 fname=out_dir / f"score_trafo_{key}.png",
             )
-
 
             # ---- save metrics ----
             results = {
@@ -812,13 +773,14 @@ def run_pipeline(args):
                 "trafo_bin_sig": float(metrics["trafo_bin_sig"]),
                 "sic": metrics["sic"].tolist(),
                 "sic_unc": metrics["sic_unc"].tolist(),
-                "trafo_edge": metrics["trafo_edge"],
+                "trafo_edge": metrics["trafo_edge"].tolist(),
                 # "fitting_time": end_time - start_time,
             }
             with open(out_dir / f"eval_metrics_{key}.json", "w") as f:
                 json.dump(results, f, indent=4)
 
     logger.info(f"Done. Results saved to {out_dir}")
+
 
 # ==========================================
 # 5. Entry Point
@@ -850,7 +812,8 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble", type=int, default=1, help="Number of ensemble models to train")
     parser.add_argument("--gamma", type=float, default=1.0, help="gamma for focal loss" )
 
-    parser.add_argument("--stage", type=str, default=["train", "predict", "evaluate"], nargs="+", help="Pipeline stages to run")
+    parser.add_argument("--stage", type=str, default=["train", "predict", "evaluate"], nargs="+",
+                        help="Pipeline stages to run")
 
     # logging
     parser.add_argument("--wandb_test", action="store_true")
