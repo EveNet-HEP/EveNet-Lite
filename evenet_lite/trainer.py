@@ -893,6 +893,19 @@ class Trainer:
                 if not torch.all(finite_mask):
                     logging.debug("Non-finite weights detected; treating them as zero during loss computation.")
 
+            def assert_finite(name, x):
+                if not torch.isfinite(x).all():
+                    raise RuntimeError(
+                        f"[Rank {self.rank}] Non-finite {name}\n"
+                        f"  dtype={x.dtype}\n"
+                        f"  min={x.min().item()}\n"
+                        f"  max={x.max().item()}"
+                    )
+
+            assert_finite("features", features)
+            assert_finite("targets", targets)
+            assert_finite("weight_tensor", weight_tensor)
+            assert_finite("outputs", outputs)
             with torch.set_grad_enabled(training):
                 outputs = self._forward(model, features)
                 # if not torch.isfinite(outputs).all():
@@ -901,6 +914,7 @@ class Trainer:
                 #                   f"min={outputs.min().item()}, max={outputs.max().item()}"
                 #                   )
                 loss = compute_loss(outputs, targets, weight_tensor, gamma=self.config.loss_gamma)
+
                 if training:
                     optimizers = self.optimizers or ([self.optimizer] if self.optimizer else [])
                     for optimizer in optimizers:
