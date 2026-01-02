@@ -901,14 +901,23 @@ class Trainer:
                 #                   f"min={outputs.min().item()}, max={outputs.max().item()}"
                 #                   )
 
-                def assert_finite(name, x):
+                def assert_finite(name, x, max_print=10):
                     if not torch.isfinite(x).all():
-                        raise RuntimeError(
-                            f"[Rank {self.rank}] Non-finite {name}\n"
-                            f"  dtype={x.dtype}\n"
-                            f"  min={x.min().item()}\n"
-                            f"  max={x.max().item()}"
-                        )
+                        mask = ~torch.isfinite(x)
+                        idx = mask.nonzero(as_tuple=False)
+
+                        msg = [
+                            f"[Rank {self.rank}] Non-finite {name}",
+                            f"  shape={tuple(x.shape)} dtype={x.dtype}",
+                            f"  count={idx.shape[0]}",
+                        ]
+
+                        # Print a few offending indices
+                        for i in idx[:max_print]:
+                            val = x[tuple(i.tolist())].item()
+                            msg.append(f"  index={tuple(i.tolist())} value={val}")
+
+                        raise RuntimeError("\n".join(msg))
 
                 assert_finite("features['x']", features['x'])
                 assert_finite("features['globals']", features['globals'])
