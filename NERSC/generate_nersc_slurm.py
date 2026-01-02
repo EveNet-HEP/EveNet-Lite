@@ -33,9 +33,9 @@ def parse_args() -> argparse.Namespace:
         "--background",
         dest="backgrounds",
         action="append",
-        default=[
-            "ggHtautau", "VBFHtautau", "DYBJets_pt100to200", "DYBJets_pt200toInf", "tt1l"
-        ],
+        # default=[
+        #     "ggHtautau", "VBFHtautau", "DYBJets_pt100to200", "DYBJets_pt200toInf", "tt1l"
+        # ],
         help="Background directory name (relative to data root). Provide multiple times to include more.",
     )
     parser.add_argument(
