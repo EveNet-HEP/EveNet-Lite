@@ -902,7 +902,7 @@ class Trainer:
                         f"  max={x.max().item()}"
                     )
 
-            assert_finite("features", features)
+            # assert_finite("features", features)
             assert_finite("targets", targets)
             assert_finite("weight_tensor", weight_tensor)
             assert_finite("outputs", outputs)

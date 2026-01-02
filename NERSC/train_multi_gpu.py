@@ -407,7 +407,17 @@ def main() -> None:
         class_labels=args.class_labels,
         feature_names=feature_names,
         normalization_rules=normalization_rules,
-        normalization_stats=normalization_stats,
+        # normalization_stats=normalization_stats,
+        normalization_stats={
+            "x": {
+                "mean": [ 4.5133e+00,  3.7119e+00,  9.3049e-04, -2.1650e-05,  1.0000e+00, 9.9996e-01,  4.9584e-02],
+                "std": [9.6447e-01, 7.1565e-01, 1.6589e+00, 1.8137e+00, 1.1393e-03, 6.2688e-03, 9.9875e-01],
+            },
+            "globals": {
+                "mean": [ 3.3357e+00, -7.2250e-04,  1.7050e+00,  2.1086e+00,  5.1724e+00, 5.4721e+00,  9.5483e-01,  6.0167e+00,  2.8328e+00,  4.6364e+00],
+                "std": [0.9138, 1.8135, 0.8136, 0.6403, 2.8926, 0.8141, 0.2768, 1.0004, 2.2792, 1.2196],
+            },
+        },
         sampler=None if args.sampler == "none" else args.sampler,
         epoch_size=args.epoch_size,
         epochs=args.epochs,
