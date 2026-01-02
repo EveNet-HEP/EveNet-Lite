@@ -65,7 +65,20 @@ BKG_META = {
         "xsec": 0.237,
         "nEvent": 1_500_000,
     },
+    "TT1L": {
+        "xsec": 135.8,
+        "nEvent": 60_250_000,
+    },
+    "ZTauTau_bjets": {
+        "xsec": 20.24,
+        "nEvent": 9_928_598,
+    },
+    "ZTauTau_bbjets": {
+        "xsec": 9.637,
+        "nEvent": 16_250_000,
+    },
 }
+
 
 def _match_bkg_sample(path: Path) -> str:
     path_str = str(path)
@@ -74,11 +87,13 @@ def _match_bkg_sample(path: Path) -> str:
             return name
     raise ValueError(f"Cannot match background sample for path: {path}")
 
+
 def _make_sample_weights(path: Path, n_events: int) -> torch.Tensor:
     sample = _match_bkg_sample(path)
     meta = BKG_META[sample]
     w = meta["xsec"] / meta["nEvent"] * 1000 * 36
     return torch.full((n_events,), w, dtype=torch.float32)
+
 
 def _load_split(sig_paths: List[Path], bkg_paths: List[Path]):
     sig_parts = [torch.load(p, weights_only=False, map_location="cpu") for p in sig_paths]
@@ -168,11 +183,14 @@ if __name__ == '__main__':
     # ]).astype(np.float32))
 
     (train_features, train_labels, train_weights) = _load_split(
-        _resolve_paths("/Users/avencastmini/PycharmProjects/EveNet-Lite/workspace/grid/MX-500_MY-90/evenet/train/*.pt",
-                       "train signal"),
         _resolve_paths(
-            "/Users/avencastmini/PycharmProjects/EveNet-Lite/workspace/grid/{DYBJets_pt100to200,DYBJets_pt200toInf,ggHtautau,VBFHtautau,tt1l}/evenet/train/*.pt",
-            "train background"),
+            "/global/cfs/cdirs/m2616/avencast/Event_Level_Analysis/data/Grid_Study/MX-500_MY-90/evenet/train/*.pt",
+            "train signal"
+        ),
+        _resolve_paths(
+            "/global/cfs/cdirs/m2616/avencast/Event_Level_Analysis/data/Grid_Study/{TT1L,ZTauTau_bjets,ZTauTau_bbjets}/evenet/train/*.pt",
+            "train background"
+        ),
     )
 
     N = train_labels.shape[0]
@@ -234,7 +252,7 @@ if __name__ == '__main__':
     clf.fit(
         train_data=(train_features, train_labels, None),
         val_data=(val_features, val_labels, val_weights),
-        eval_data=(val_features, val_labels, val_weights),
+        # eval_data=(val_features, val_labels, val_weights),
         # callbacks=[ParameterRandomizationCallback(min_values=[300, 500], max_values=[800, 1200])],
         callbacks=[],
         epochs=1,

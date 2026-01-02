@@ -77,6 +77,18 @@ BKG_META = {
         "xsec": 0.237,
         "nEvent": 1_500_000,
     },
+    "TT1L": {
+        "xsec": 135.8,
+        "nEvent": 60_250_000,
+    },
+    "ZTauTau_bjets": {
+        "xsec": 20.24,
+        "nEvent": 9_928_598,
+    },
+    "ZTauTau_bbjets": {
+        "xsec": 9.637,
+        "nEvent": 16_250_000,
+    },
 }
 
 def _match_bkg_sample(path: Path) -> str:

@@ -895,11 +895,11 @@ class Trainer:
 
             with torch.set_grad_enabled(training):
                 outputs = self._forward(model, features)
-                if not torch.isfinite(outputs).all():
-                    logging.debug("Non-finite outputs detected; treating them as zero."
-                                  f"[Rank {self.rank}] Non-finite logits detected\n"
-                                  f"min={outputs.min().item()}, max={outputs.max().item()}"
-                                  )
+                # if not torch.isfinite(outputs).all():
+                #     logging.debug("Non-finite outputs detected; treating them as zero."
+                #                   f"[Rank {self.rank}] Non-finite logits detected\n"
+                #                   f"min={outputs.min().item()}, max={outputs.max().item()}"
+                #                   )
                 loss = compute_loss(outputs, targets, weight_tensor, gamma=self.config.loss_gamma)
                 if training:
                     optimizers = self.optimizers or ([self.optimizer] if self.optimizer else [])
