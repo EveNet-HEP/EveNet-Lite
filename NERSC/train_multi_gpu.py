@@ -110,7 +110,7 @@ def _load_split(sig_paths: List[Path], bkg_paths: List[Path]):
     bkg_parts = [torch.load(p, weights_only=False, map_location="cpu") for p in bkg_paths]
 
     available_keys = {key for part in [*sig_parts, *bkg_parts] for key in part.keys()}
-    requested_keys = ["x", "x_mask", "global", "params"]
+    requested_keys = ["x", "x_mask", "globals", "params"]
 
     features = {}
     for key in requested_keys:
