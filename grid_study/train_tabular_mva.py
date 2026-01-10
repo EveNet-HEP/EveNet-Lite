@@ -15,6 +15,8 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from shared_metrics import plot_score_overlay
+
+from config_loader import ConfigLoader, DatasetInfo
 # --- Optional Imports ---
 try:
     from tabpfn import TabPFNClassifier
@@ -47,150 +49,6 @@ except ImportError as e:
         }
 
 
-# ==========================================
-# 1. Configuration & Data Structures
-# ==========================================
-
-@dataclass
-class DatasetInfo:
-    name: str
-    category: str
-    path: Path
-    is_signal: bool
-    xsec: float = 1.0
-    nevents: float = 1.0
-    mx: float = 0.0
-    my: float = 0.0
-
-
-class ConfigLoader:
-    def __init__(self, yaml_path: str, base_data_dir: str):
-        self.yaml_path = Path(yaml_path)
-        self.base_dir = Path(base_data_dir)
-        self.signal_config = {}
-        self.bkg_config = {}
-        self._load_yaml()
-
-    def _load_yaml(self):
-        if not self.yaml_path.exists():
-            logger.error(f"YAML config not found: {self.yaml_path}")
-            sys.exit(1)
-        with open(self.yaml_path) as f:
-            raw = yaml.safe_load(f)
-            self.signal_config = raw.get('signal', {})
-            self.bkg_config = raw.get('background', {})
-
-    def parse_mass(self, folder_name: str) -> Tuple[float, float]:
-        """Extracts MX, MY from folder name strings like 'MX-900_MY-100'."""
-        match = re.search(r"MX-(\d+)_MY-(\d+)", folder_name)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        return 0.0, 0.0
-
-    def discover_datasets(self) -> List[DatasetInfo]:
-        """
-        Scans base_dir and matches against YAML definitions.
-        Returns a concrete list of DatasetInfo objects.
-        """
-        found_datasets = []
-        existing_folders = [f for f in self.base_dir.iterdir() if f.is_dir()]
-
-        # 1. Discover Backgrounds (Explicit Match)
-        for name, cfg in self.bkg_config.items():
-            matched = [f for f in existing_folders if name in f.name]
-
-            if not matched:
-                logger.warning(f"Background '{name}' not found in {self.base_dir}")
-                continue
-
-            # Assume strict 1-to-1 match for background definitions in YAML
-            target = matched[0]
-            cutflow_json_first = target / "../cutflow.json"
-            if cutflow_json_first.exists():
-                with open(cutflow_json_first, "r") as f:
-                    cutflow = json.load(f)
-                nevents = cutflow[name].get("total", None)
-                if nevents is None:
-                    raise ValueError(f"Missing 'all' in {cutflow_json_first}")
-                nevents = float(nevents)
-                if nevents == 0.0:
-                    nevents = 1.0
-                print("Using cutflow from", cutflow_json_first)
-            else:
-                cutflow_json = target / "cutflow.json"
-                if cutflow_json.exists():
-                    with open(cutflow_json, "r") as f:
-                        cutflow = json.load(f)
-                    nevents = cutflow.get("all", None)
-                    if nevents is None:
-                        raise ValueError(f"Missing 'all' in {cutflow_json}")
-                    nevents = float(nevents)
-                    print("Using cutflow from", cutflow_json)
-                    if nevents == 0.0:
-                        nevents = 1.0
-                else:
-                    nevents = cfg.get('nEvent', 1.0)
-
-
-            found_datasets.append(DatasetInfo(
-                name=name,
-                path=target,
-                is_signal=False,
-                xsec=cfg.get('xsec', 1.0),
-                nevents=nevents,
-                category=cfg.get("name", "background")
-            ))
-
-        # 2. Discover Signals (Regex Pattern Match)
-        # Convert glob wildcard to rough regex for safety or just use string check
-        # Here we rely on the specific format "NMSSM..."
-        for folder in existing_folders:
-            if "MX-" in folder.name:
-                mx, my = self.parse_mass(folder.name)
-                # Optional: Filter by YAML range if needed
-                # mx_range = self.signal_config.get('mx', [0, 99999])
-                # if not (mx_range[0] <= mx <= mx_range[1]): continue
-
-                cutflow_json_first = folder / "../cutflow.json"
-                if cutflow_json_first.exists():
-                    with open(cutflow_json_first, "r") as f:
-                        cutflow = json.load(f)
-                    nevents = cutflow[folder.name].get("total", None)
-                    if nevents is None:
-                        raise ValueError(f"Missing 'all' in {cutflow_json_first}")
-                    nevents = float(nevents)
-                    if nevents == 0.0:
-                        nevents = 1.0
-                    print("Using cutflow from", cutflow_json_first)
-                else:
-                    cutflow_json = folder / "cutflow.json"
-                    if cutflow_json.exists():
-                        with open(cutflow_json, "r") as f:
-                            cutflow = json.load(f)
-                        nevents = cutflow.get("all", None)
-                        if nevents is None:
-                            raise ValueError(f"Missing 'all' in {cutflow_json}")
-                        nevents = float(nevents)
-                        if nevents == 0.0:
-                            nevents = 1.0
-                    else:
-                        nevents = 184000.0
-
-                found_datasets.append(DatasetInfo(
-                    name=folder.name,
-                    path=folder,
-                    is_signal=True,
-                    xsec=0.01,  # 10 fb
-                    nevents=nevents,  #TODO: make configurable, now hardcoded
-                    mx=mx,
-                    my=my,
-                    category="signal"
-                ))
-
-        logger.info(
-            f"Discovered {len(found_datasets)} datasets ({len([d for d in found_datasets if d.is_signal])} Signal).")
-        return found_datasets
-
 
 # ==========================================
 # 2. Data Management
@@ -222,7 +80,24 @@ class DatasetManager:
             if not files:
                 continue
 
+            max_events = getattr(ds, "max_events", None)
+            seen = 0  # events kept so far for this dataset
+            total_number = 0
+            norm_factor = 1.0
+            if max_events is not None:
+                for fp in files:
+                    with np.load(fp, allow_pickle=True) as data:
+                        if 'X' not in data: continue
+                        arr = data['X']
+                        N = len(arr)
+                        total_number += N
+                if max_events < total_number:
+                    norm_factor = total_number / max_events
+                print(f"only use {max_events} out of {total_number} events from {ds.name}")
+
             for fp in files:
+                if (max_events is not None and seen >= max_events):
+                    break
                 try:
                     with np.load(fp, allow_pickle=True) as data:
                         if 'X' not in data: continue
@@ -246,7 +121,7 @@ class DatasetManager:
                         # --- Weights ---
                         # Weight = (Sign of genWeight) * (xsec / total_nevents)
                         raw_w = data['weights'] if 'weights' in data else np.ones(len(arr))
-                        phys_w = raw_w * (ds.xsec * lumi / ds.nevents) * 2 # Factor 2 for train/valid split
+                        phys_w = raw_w * (ds.xsec * lumi / ds.nevents) * 2 * norm_factor # Factor 2 for train/valid split
                         # if split == "train":
                         #     phys_w = abs(phys_w)  # Use absolute weights for training
                         #
@@ -269,6 +144,8 @@ class DatasetManager:
                         w_list.append(phys_w)
                         m_list.append(mass_arr)
                         p_list.append([ds.category] * N)
+
+                        seen += N
 
                 except Exception as e:
                     logger.warning(f"Corrupt file {fp}: {e}")
@@ -527,7 +404,7 @@ def run_pipeline(args):
                 reg_alpha=0.0,
                 tree_method="gpu_hist" if use_gpu else "hist",
                 random_state=42,
-                early_stopping_rounds = 100
+                early_stopping_rounds = 200
             )
             model.fit(
                 X_tr, y_tr, sample_weight=w_tr,
@@ -650,18 +527,22 @@ def run_pipeline(args):
             else:
                 y_pred = model.predict_proba(X_eval)[:, 1]
 
+            # Construct the filename
+            filename = f"predictions_MX-{int(round(mx.item()))}_MY-{int(round(my.item()))}.npz"
+            output_path = out_dir / filename
 
-            predict_value = {
-                "y_true": y_eval.tolist(),
-                "y_pred": y_pred.tolist(),
-                "w": w_eval.tolist(),
-                "proc": p_eval.tolist(),
-                "mx": mx,
-                "my": my,
-            }
+            # Save directly using keyword arguments.
+            # No need for .tolist() or .item() here; numpy handles its own types best.
+            np.savez_compressed(
+                output_path,
+                y_true=y_eval,
+                y_pred=y_pred,
+                w=w_eval,
+                proc=p_eval,
+                mx=mx,
+                my=my
+            )
 
-            with open(out_dir / f"predictions_MX-{int(round(mx))}_MY-{int(round(my))}.json", "w") as f:
-                json.dump(predict_value, f, indent=4)
 
     if "evaluate" in args.stage:
         logger.info(">>> Evaluating Predictions...")
@@ -673,18 +554,19 @@ def run_pipeline(args):
             if args.mY is not None and (int(my) != int(args.mY)):
                 continue
 
-            pred_file = out_dir / f"predictions_MX-{int(mx)}_MY-{int(my)}.json"
+
+            pred_file = out_dir / f"predictions_MX-{int(round(mx))}_MY-{int(round(my))}.npz"
             if not pred_file.exists():
                 logger.warning(f"Prediction file not found: {pred_file}")
                 continue
 
-            with open(pred_file) as f:
-                pred_data = json.load(f)
+            with np.load(pred_file, allow_pickle=True) as data:
 
-            y_eval = np.array(pred_data['y_true'])
-            y_pred = np.array(pred_data['y_pred'])
-            w_eval = np.array(pred_data['w'])
-            p_eval = np.array(pred_data['proc'])
+                # No need for np.array() casting; they are already loaded as ndarrays
+                y_eval = data["y_true"]
+                y_pred = data["y_pred"]
+                w_eval = data["w"]
+                p_eval = data["proc"]
 
             nevents_by_name = {ds.category: ds.nevents if ds.category != 'signal' else 1.0 for ds in all_datasets }
             nevents_eval = np.array([nevents_by_name[p] for p in p_eval])
