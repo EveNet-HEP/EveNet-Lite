@@ -18,11 +18,13 @@ import torch
 import torch.distributed as dist
 import random
 
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)   # if using CUDA
+from config_loader import DatasetInfo, ConfigLoader
+
+# seed = 42
+# random.seed(seed)
+# np.random.seed(seed)
+# torch.manual_seed(seed)
+# torch.cuda.manual_seed_all(seed)   # if using CUDA
 
 from evenet.network.metrics.assignment import shared_epoch_end
 
@@ -116,134 +118,6 @@ def filter_dict(data: dict, mask):
     return slice_data(data, mask)
 
 
-@dataclass
-class DatasetInfo:
-    name: str
-    category: str
-    path: Path
-    is_signal: bool
-    xsec: float = 1.0
-    nevents: float = 1.0
-    mx: float = 0.0
-    my: float = 0.0
-
-
-class ConfigLoader:
-    def __init__(self, yaml_path: str, base_data_dir: str):
-        self.yaml_path = Path(yaml_path)
-        self.base_dir = Path(base_data_dir)
-        self.signal_config = {}
-        self.bkg_config = {}
-        self._load_yaml()
-
-    def _load_yaml(self):
-        if not self.yaml_path.exists():
-            logger.error(f"YAML config not found: {self.yaml_path}")
-            sys.exit(1)
-        with open(self.yaml_path) as f:
-            raw = yaml.safe_load(f)
-            self.signal_config = raw.get('signal', {})
-            self.bkg_config = raw.get('background', {})
-
-    def parse_mass(self, folder_name: str) -> Tuple[float, float]:
-        match = re.search(r"MX-(\d+)_MY-(\d+)", folder_name)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        return 0.0, 0.0
-
-    def discover_datasets(self) -> List[DatasetInfo]:
-        found_datasets = []
-        # Note: Assuming structure base_dir/process_name/...
-        existing_folders = [f for f in self.base_dir.iterdir() if f.is_dir()]
-
-        # 1. Discover Backgrounds
-        for name, cfg in self.bkg_config.items():
-            matched = [f for f in existing_folders if name in f.name]
-            if not matched:
-                logger.warning(f"Background '{name}' not found in {self.base_dir}")
-                continue
-
-            target = matched[0]
-
-            cutflow_json_first = target / "../cutflow.json"
-            if cutflow_json_first.exists():
-                with open(cutflow_json_first, "r") as f:
-                    cutflow = json.load(f)
-                nevents = cutflow[name].get("total", None)
-                if nevents is None:
-                    raise ValueError(f"Missing 'all' in {cutflow_json_first}")
-                nevents = float(nevents)
-                if nevents == 0.0:
-                    nevents = 1.0
-                print("Using cutflow from", cutflow_json_first)
-            else:
-                cutflow_json = target / "cutflow.json"
-                if cutflow_json.exists():
-                    with open(cutflow_json, "r") as f:
-                        cutflow = json.load(f)
-                    nevents = cutflow.get("all", None)
-                    if nevents is None:
-                        raise ValueError(f"Missing 'all' in {cutflow_json}")
-                    nevents = float(nevents)
-                    print("Using cutflow from", cutflow_json)
-                    if nevents == 0.0:
-                        nevents = 1.0
-                else:
-                    nevents = cfg.get('nEvent', 1.0)
-
-            found_datasets.append(DatasetInfo(
-                name=name,
-                path=target,
-                is_signal=False,
-                xsec=cfg.get('xsec', 1.0),
-                nevents=nevents,
-                category=cfg.get("name", "background")
-            ))
-
-        # 2. Discover Signals
-        for folder in existing_folders:
-            if "MX-" in folder.name:
-                mx, my = self.parse_mass(folder.name)
-                cutflow_json = folder / "cutflow.json"
-                cutflow_json_first = folder / "../cutflow.json"
-                if cutflow_json_first.exists():
-                    with open(cutflow_json_first, "r") as f:
-                        cutflow = json.load(f)
-                    nevents = cutflow[folder.name].get("total", None)
-                    if nevents is None:
-                        raise ValueError(f"Missing 'all' in {cutflow_json_first}")
-                    nevents = float(nevents)
-                    if nevents == 0.0:
-                        nevents = 1.0
-                    print("Using cutflow from", cutflow_json_first)
-                else:
-                    cutflow_json = folder / "cutflow.json"
-                    if cutflow_json.exists():
-                        with open(cutflow_json, "r") as f:
-                            cutflow = json.load(f)
-                        nevents = cutflow.get("all", None)
-                        if nevents is None:
-                            raise ValueError(f"Missing 'all' in {cutflow_json}")
-                        nevents = float(nevents)
-                        if nevents == 0.0:
-                            nevents = 1.0
-                    else:
-                        nevents = 184000.0
-                found_datasets.append(DatasetInfo(
-                    name=folder.name,
-                    path=folder,
-                    is_signal=True,
-                    xsec=0.01, # 10 fb
-                    nevents=nevents,  # TODO: make configurable, now hardcoded
-                    mx=mx,
-                    my=my,
-                    category="signal"
-                ))
-
-        logger.info(
-            f"Discovered {len(found_datasets)} datasets ({len([d for d in found_datasets if d.is_signal])} Signal).")
-        return found_datasets
-
 
 # ==========================================
 # 2. Data Management (EveNet Specific)
@@ -284,7 +158,23 @@ class EveNetDatasetManager:
             files = sorted(list(search_path.glob("*.pt")))
             if not files:
                 continue
+            max_events = getattr(ds, "max_events", None)
+            seen = 0  # events kept so far for this dataset
+            total_number = 0
+            norm_factor = 1.0
+            if max_events is not None:
+                for fp in files:
+                    data = torch.load(fp, map_location="cpu", weights_only=False)  # force CPU to avoid device mismatch
+                    N = data["x"].shape[0]
+                    total_number += N
+                if max_events < total_number:
+                    norm_factor = total_number / max_events
+                print(f"only use {max_events} out of {total_number} events from {ds.name}")
+
+
             for fp in files:
+                if max_events is not None and seen >= max_events:
+                    break
                 try:
                     data = torch.load(fp, map_location="cpu", weights_only=False)  # force CPU to avoid device mismatch
                     if "x" not in data:
@@ -324,7 +214,7 @@ class EveNetDatasetManager:
                     # avoid python floats leaking dtype/device
                     xsec = float(ds.xsec)
                     nevents = float(ds.nevents) if float(ds.nevents) != 0.0 else 1.0
-                    phys_w = raw_w * (xsec * lumi / nevents) * 2 #ratio split for 2
+                    phys_w = raw_w * (xsec * lumi / nevents) * 2 * norm_factor #ratio split for 2
                     # if split == "train":
                     #     phys_w = phys_w.abs()
 
@@ -345,6 +235,7 @@ class EveNetDatasetManager:
                         else:
                             mass_arr = torch.zeros((N, 2), dtype=torch.float32, device="cpu")
 
+
                     # --- store ---
                     data_store["x"].append(x_data)
                     data_store["globals"].append(g)
@@ -353,6 +244,10 @@ class EveNetDatasetManager:
                     data_store["w"].append(phys_w)
                     data_store["m"].append(mass_arr)
                     data_store["proc"].append([ds.category] * N)
+
+                    # update counter AFTER successful append
+                    if max_events is not None:
+                        seen += N
 
                 except Exception as e:
                     logger.warning(f"Corrupt/bad file {fp}: {e}")
@@ -546,6 +441,37 @@ def run_pipeline(args):
         # Pass numpy if your loader expects numpy; otherwise pass torch and convert inside loader
         d_bkg_tr = dm.load_data(bkg_datasets, "train", target_masses=target_masses.cpu().numpy(), lumi=args.lumi, max_entries=args.max_bkg_entries)
 
+        if args.parameterize and args.bkg_vs_sig_rate is not None:
+            number_of_bkg = d_bkg_tr["w"].shape[0]
+            number_of_sig = d_sig_tr["w"].shape[0]
+            number_of_target_sig = number_of_bkg / float(args.bkg_vs_sig_rate)
+            if (number_of_target_sig < number_of_sig):
+                downsampling_ratio = number_of_target_sig / number_of_sig
+
+                # 1. Determine exact number of samples to keep
+                num_samples = int(number_of_target_sig)
+
+                # 2. Prepare weights for sampling probabilities
+                # Use absolute values to handle potential negative NLO weights
+                # Add epsilon to ensure no zero-probability errors if weights are 0
+                sample_probs = d_sig_tr["w"].abs() + 1e-20
+
+                # 3. Sample indices: Higher weight == Higher chance to be picked
+                logger.info(f"Downsampling Signal: keeping {num_samples}/{int(number_of_sig)} events based on weight.")
+                rng = torch.Generator(device=sample_probs.device)
+                rng.manual_seed(42)  # Use a fixed constant seed
+
+                sampled_indices = torch.multinomial(
+                    sample_probs,
+                    num_samples,
+                    replacement=False,
+                    generator=rng
+                )
+
+                # 4. Apply selection using your existing slice_data helper
+                d_sig_tr = slice_data(d_sig_tr, sampled_indices)
+                d_sig_tr = dm.reweight_signals(d_sig_tr, logger=logger)
+
         # ---- global balance: scale background to match total signal weight ----
         sig_sum = d_sig_tr["w"].sum()
         bkg_sum = d_bkg_tr["w"].sum()
@@ -565,7 +491,7 @@ def run_pipeline(args):
         # Create a dedicated generator with a FIXED seed for splitting
         # This ensures Rank 0, 1, 2, 3 all generate the EXACT SAME indices
         g_split = torch.Generator()
-        g_split.manual_seed(12345)  # Hardcoded seed for data splitting consistency
+        g_split.manual_seed(42)  # Hardcoded seed for data splitting consistency
 
         indices = torch.randperm(N_full, generator=g_split)
 
@@ -652,7 +578,7 @@ def run_pipeline(args):
                                                                     learning_rate]
 
         module_lists = [["Classification", "ObjectEncoder", "PET", "GlobalEmbedding"]] if not args.pretrain else [
-            ["PET"], ["ObjectEncoder"], ["GlobalEmbedding", "Classification"]]
+            ["PET"], ["ObjectEncoder","GlobalEmbedding"], ["Classification"]]
 
         learning_rates_new = []
         module_lists_new = []
@@ -837,17 +763,21 @@ def run_pipeline(args):
             w_eval = eval_data["w"].detach().cpu().numpy()
             p_eval = eval_data["proc"]  # numpy/object
 
-            predict_value = {
-                "y_true": y_eval.tolist(),
-                "y_pred": y_pred.tolist(),
-                "w": w_eval.tolist(),
-                "proc": p_eval.tolist(),
-                "mx": mx.item(),
-                "my": my.item(),
-            }
+            # Construct the filename
+            filename = f"predictions_MX-{int(round(mx.item()))}_MY-{int(round(my.item()))}.npz"
+            output_path = out_dir / filename
 
-            with open(out_dir / f"predictions_MX-{int(round(mx.item()))}_MY-{int(round(my.item()))}.json", "w") as f:
-                json.dump(predict_value, f, indent=4)
+            # Save directly using keyword arguments.
+            # No need for .tolist() or .item() here; numpy handles its own types best.
+            np.savez_compressed(
+                output_path,
+                y_true=y_eval,
+                y_pred=y_pred,
+                w=w_eval,
+                proc=p_eval,
+                mx=mx,
+                my=my
+            )
 
     if "evaluate" in args.stage:
         def is_rank_zero():
@@ -862,23 +792,22 @@ def run_pipeline(args):
                 if int(my_val) != int(args.mY):
                     continue
 
-            with open(load_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.json", "r") as f:
-                predict_value = json.load(f)
-
             if not is_rank_zero():
                 continue
+            file_path = load_dir / f"predictions_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.npz"
 
-            y_eval = np.array(predict_value["y_true"])
-            y_pred = np.array(predict_value["y_pred"])
-            w_eval = np.array(predict_value["w"])
-            p_eval = np.array(predict_value["proc"])
+            with np.load(file_path, allow_pickle=True) as data:
+
+                # No need for np.array() casting; they are already loaded as ndarrays
+                y_eval = data["y_true"]
+                y_pred = data["y_pred"]
+                w_eval = data["w"]
+                p_eval = data["proc"]
+
 
             nevents_by_name = {ds.category: ds.nevents if ds.category != 'signal' else 1.0 for ds in all_datasets }
             nevents_eval = np.array([nevents_by_name[p] for p in p_eval])
             # w_eval = w_eval / nevents_eval
-
-            mx = predict_value["mx"]
-            my = predict_value["my"]
             # ---- metrics ----
 
             metrics = calculate_physics_metrics(
@@ -907,7 +836,7 @@ def run_pipeline(args):
                 w_eval=w_eval,
                 p_eval=p_eval,
                 y_pred=y_pred,
-                fname = out_dir / f"score_uniform_binning_MX-{int(mx)}_MY-{int(my)}.png"
+                fname = out_dir / f"score_uniform_binning_MX-{int(mx_val)}_MY-{int(my_val)}.png"
             )
             plot_score_overlay(
                 y_eval=y_eval,
@@ -916,7 +845,7 @@ def run_pipeline(args):
                 p_eval=p_eval,
                 bins=metrics['trafo_edge'],
                 uniform_bin_plot=True,
-                fname = out_dir / f"score_auto_binning_flat_MX-{int(mx)}_MY-{int(my)}.png"
+                fname = out_dir / f"score_auto_binning_flat_MX-{int(mx_val)}_MY-{int(my_val)}.png"
             )
             plot_score_overlay(
                 y_eval=y_eval,
@@ -925,7 +854,7 @@ def run_pipeline(args):
                 p_eval=p_eval,
                 bins=metrics['trafo_edge'],
                 uniform_bin_plot=False,
-                fname = out_dir / f"score_auto_binning_MX-{int(mx)}_MY-{int(my)}.png"
+                fname = out_dir / f"score_auto_binning_MX-{int(mx_val)}_MY-{int(my_val)}.png"
             )
 
             # ---- save metrics ----
@@ -986,6 +915,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_test", action="store_true")
     parser.add_argument("--use_adapter", action="store_true")
     parser.add_argument("--continue_training", action="store_true")
+    parser.add_argument("--bkg_vs_sig_rate", default = None)
     args = parser.parse_args()
 
     if not args.parameterize and (args.mX is None or args.mY is None):
