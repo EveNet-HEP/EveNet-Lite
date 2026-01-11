@@ -261,6 +261,8 @@ def binned_sig(
 
     # Step 4: Calculate significance for each bin
     significances = calculate_binned_significance(sig_hist, bkg_hist, method=method)
+    # Step 4.2: Replace nan significances with zero
+    significances = np.nan_to_num(significances, nan=0.0)
 
     def log_binning_summary(
             logger,
