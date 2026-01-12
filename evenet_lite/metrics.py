@@ -153,6 +153,7 @@ def compute_sic_from_scores(
         edges: np.ndarray,
         min_bkg_events: int = 10,
         min_bkg_ratio: Optional[float] = None,
+        max_uncertainty_cut: Optional[float] = None,
 ) -> Dict[str, np.ndarray]:
     """Compute SIC curve and related quantities on weighted scores.
 
@@ -249,6 +250,13 @@ def compute_sic_from_scores(
     bkg_rej_unc[valid] = bkg_eff_unc[valid] * (bkg_rej[valid] ** 2)
     sic[valid] = sig_eff[valid] * np.sqrt(bkg_rej[valid])
     sic_unc[valid] = sig_eff[valid] * 0.5 / np.sqrt(bkg_rej[valid]) * bkg_rej_unc[valid]
+
+    if max_uncertainty_cut is not None:
+        valid &= (sic_unc / (sic + eps)) <= max_uncertainty_cut # nan entries return False
+        bkg_rej[~valid] = np.nan
+        bkg_rej_unc[~valid] = np.nan
+        sic[~valid] = np.nan
+        sic_unc[~valid] = np.nan
 
     if np.any(valid):
         best_idx = int(np.nanargmax(sic))
@@ -460,6 +468,7 @@ def calculate_physics_metrics(
         Zb: int = 5,
         min_bkg_per_bin: int = 3,
         min_mc_stats: float = 1.0,
+        max_uncertainty_cut: Optional[float] = None,
         include_signal_in_stat: bool = True,
         edges_low=None,
         edges_high=None,
@@ -479,7 +488,7 @@ def calculate_physics_metrics(
     edges = np.linspace(0, 1, bins + 1)
 
     sic_result = compute_sic_from_scores(
-        targets, scores, weights, edges, min_bkg_events=min_bkg_events, min_bkg_ratio=min_bkg_ratio
+        targets, scores, weights, edges, min_bkg_events=min_bkg_events, min_bkg_ratio=min_bkg_ratio, max_uncertainty_cut=max_uncertainty_cut
     )
 
     try:
