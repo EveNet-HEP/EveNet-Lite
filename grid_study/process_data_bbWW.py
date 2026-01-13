@@ -28,7 +28,9 @@ try:
 except Exception:
     pass
 
-
+MW_PDG = 80.4 # https://pdg.lbl.gov/2025/tables/contents_tables.html
+MT_PDG = 172.5 # https://pdg.lbl.gov/2025/tables/contents_tables.html
+MH_PDG = 125.2 # https://pdg.lbl.gov/2025/tables/contents_tables.html
 PI = np.pi
 
 HIST_DEFS = {
@@ -74,15 +76,32 @@ HIST_DEFS = {
     "bb_inv": _edges(60, 0, 1500),
     "bb_dR":  _edges(50, 0, 6),
     "bb_mT":  _edges(60, 0, 3000),
+
+    "W_mT":  _edges(60, 0, 3000),
+
+    "topness": _edges(100, 0, 100),
+    "top_dr_lb": _edges(50, 0, 6),
+    "top_m_lb": _edges(60, 0, 300),
+    "top_tlep_reco_mass": _edges(60, 0, 300),
+    "top_whad_reco_mass": _edges(60, 0, 120),
+    "top_whad_dr_qq": _edges(50, 0, 6),
+    "top_thad_reco_mass": _edges(60, 0, 400),
+    "top_thad_dr_bqq": _edges(50, 0, 6),
+
 }
 
 # --- Per-hypothesis features ---
-for h in ["A", "B1", "B2"]:
+for h in ["A", "B"]:
     HIST_DEFS.update({
         # W_had (qq)
         f"{h}_Whad_m":  _edges(60, 0, 500),
         f"{h}_Whad_dR": _edges(50, 0, 6),
         f"{h}_Whad_pt": _edges(60, 0, 800),
+
+        f"{h}_q1_pt":_edges(60, 0, 800),
+        f"{h}_q2_pt": _edges(60, 0, 800),
+        f"{h}_q1_eta":  _edges(50, -2.5, 2.5),
+        f"{h}_q2_eta":  _edges(50, -2.5, 2.5),
 
         # WW visible (l + qq)
         f"{h}_WW_vis_m":  _edges(60, 0, 2000),
@@ -199,6 +218,161 @@ class FullLogicProcessor(processor.ProcessorABC):
     def accumulator(self):
         return self._accumulator
 
+    def solve_neutrino(self, l1_p4, met):
+        metpt_safe = ak.where(met.pt > 0, met.pt, 1e-6)
+
+        mu = (MW_PDG ** 2) / 2.0 + l1_p4.pt * met.pt * np.cos(l1_p4.phi - met.phi)
+        A = mu * l1_p4.pz / (l1_p4.pt ** 2)
+        B = (mu ** 2 * l1_p4.pz ** 2) / (l1_p4.pt ** 4) - (
+                (l1_p4.energy ** 2 * met.pt ** 2 - mu ** 2) / (l1_p4.pt ** 2)
+        )
+        cand_ans = ak.where(abs(A- np.sqrt(np.maximum(B, 0))) < abs(A + np.sqrt(np.maximum(B, 0))), A- np.sqrt(np.maximum(B, 0)), A + np.sqrt(np.maximum(B, 0)))
+        pz_nu = ak.where(B < 0, A, cand_ans)
+        nu_p4 = ak.zip(
+            {
+                "pt": met.pt,
+                "eta": np.arcsinh(pz_nu / metpt_safe),
+                "phi": met.phi,
+                "mass": 0.0,
+            },
+            with_name="PtEtaPhiMLorentzVector",
+        )
+        return nu_p4
+
+
+    def topness(self, leptons, jets, met):
+        MW = MW_PDG
+        MT = MT_PDG
+
+        sigma_MW = 11.83
+        sigma_MT_had = 20.87
+        sigma_MT_lep = 28.72
+
+        def p4_from_components(pt, eta, phi, mass):
+            return ak.zip(
+                {"pt": pt, "eta": eta, "phi": phi, "mass": mass},
+                with_name="PtEtaPhiMLorentzVector",
+            )
+
+        def p4(obj):
+            return p4_from_components(obj.pt, obj.eta, obj.phi, obj.mass)
+
+        # ----------------------------
+        # Basic masks and sorting
+        # ----------------------------
+        has_lep = ak.num(leptons, axis=1) > 0
+
+        jets_sorted = jets[ak.argsort(jets.pt, axis=1, ascending=False)]
+        jets_sorted["index"] = ak.local_index(jets_sorted, axis=1)
+        is_btag = jets_sorted.btagDeepFlavB > self.cfg["btag_wp"]
+
+        bjets = jets_sorted[is_btag]
+        ljets = jets_sorted[~is_btag]
+        # We need: >=1 lepton, >=2 bjets (one leptonic b + one hadronic b), >=2 light jets
+        valid = has_lep & (ak.num(bjets, axis=1) >= 2) & (ak.num(ljets, axis=1) >= 2)
+        # ----------------------------
+        # Leading lepton (filled for safe math)
+        # ----------------------------
+        l1 = ak.firsts(leptons)
+        l1_pt = ak.fill_none(l1.pt, 0.0)
+        l1_eta = ak.fill_none(l1.eta, 0.0)
+        l1_phi = ak.fill_none(l1.phi, 0.0)
+        l1_mass = ak.fill_none(l1.mass, 0.0)
+        l1_p4 = p4_from_components(l1_pt, l1_eta, l1_phi, l1_mass)
+
+        # ----------------------------
+        # Neutrino pz from W-mass constraint (safe for met.pt=0 and missing lepton)
+        # ----------------------------
+
+        nu_p4 = self.solve_neutrino(l1_p4, met)
+        w_lep = l1_p4 + nu_p4
+
+        # ----------------------------
+        # Pick leptonic b: minimize |m(w_lep + b) - MT|
+        # (index-free selection to avoid crashes on empty lists)
+        # ----------------------------
+        b_p4 = p4(bjets)
+        m_wb = (w_lep[:, None] + b_p4).mass
+        delta = np.abs(m_wb - MT)
+
+        min_delta = ak.fill_none(ak.min(delta, axis=1), np.inf)
+        best_mask = delta == min_delta[:, None]
+        b_lep = ak.firsts(bjets[best_mask])
+
+        # Build leptonic-top mass term (filled if b_lep missing)
+        b_lep_pt = ak.fill_none(b_lep.pt, 0.0)
+        b_lep_eta = ak.fill_none(b_lep.eta, 0.0)
+        b_lep_phi = ak.fill_none(b_lep.phi, 0.0)
+        b_lep_mass = ak.fill_none(b_lep.mass, 0.0)
+        b_lep_p4 = p4_from_components(b_lep_pt, b_lep_eta, b_lep_phi, b_lep_mass)
+
+        m_tlep = (w_lep + b_lep_p4).mass
+
+        # Remaining b-jets (remove chosen leptonic b by index)
+        best_idx = b_lep["index"]
+        best_idx_filled = ak.fill_none(best_idx, -1)
+        b_other = bjets[bjets["index"] != best_idx_filled[:, None]]
+        b_other_p4 = p4(b_other)
+
+        # ----------------------------
+        # Hadronic W candidates from light-jet pairs
+        # ----------------------------
+        ljets_p4 = p4(ljets)
+        wjj = ak.combinations(ljets_p4, 2, axis=1, fields=["j1", "j2"])
+        w_had = wjj.j1 + wjj.j2
+
+        # Pair each hadronic W with each remaining b (nested lists)
+        pairs = ak.cartesian({"w": w_had, "b": b_other_p4}, axis=1, nested=True)
+
+        m_whad = pairs.w.mass
+        m_thad = (pairs.w + pairs.b).mass
+
+        chi2 = (
+                ((m_whad - MW) / sigma_MW) ** 2
+                + ((m_thad - MT) / sigma_MT_had) ** 2
+                + ((m_tlep[:, None, None] - MT) / sigma_MT_lep) ** 2
+        )
+
+        chi2_min_b = ak.min(chi2, axis=2)  # (events, nW)
+        ib_best_for_w = ak.argmin(chi2, axis=2)  # (events, nW)
+
+        iw_best = ak.argmin(chi2_min_b, axis=1)  # (events,)
+        iw_best1 = ak.singletons(iw_best)  # (events, 1)
+
+        # Best W (LorentzVector)
+        whad_best = ak.firsts(w_had[iw_best1])  # (events,)
+        # Best b-index for that chosen W
+        ib_best = ak.firsts(ib_best_for_w[iw_best1])  # (events,)
+        ib_best1 = ak.singletons(ib_best)  # (events, 1)
+
+        # Best hadronic b (LorentzVector)
+        bhad_best = ak.firsts(b_other_p4[ib_best1])  # (events,)
+
+        # Now you can get qq dr from the record wjj
+        wjj_best = ak.firsts(wjj[iw_best1])  # (events,)
+        whad_dr_qq = wjj_best.j1.delta_r(wjj_best.j2)  # (events,)
+
+        thad_m = (whad_best + bhad_best).mass
+        thad_dr_bqq = whad_best.delta_r(bhad_best)
+
+        # Global min over all hypotheses; if no hypotheses -> None
+        chi2_best = ak.min(ak.min(chi2, axis=2), axis=1)
+        # Get best hadronic W and hadronic top masses
+
+        # Only keep "physically valid" events, otherwise return None
+        return {
+            "topness": ak.where(valid, chi2_best, 99999),
+            "top_dr_lb": ak.where(valid, l1_p4.delta_r(b_lep_p4), 0),
+            "top_m_lb": ak.where(valid, (l1_p4 + b_lep_p4).mass, 0),
+            "top_tlep_reco_mass": ak.where(valid, m_tlep, 0),
+            "top_whad_reco_mass": ak.where(valid, whad_best.mass, 0),
+            "top_whad_dr_qq": ak.where(valid, whad_dr_qq, 0),
+            "top_thad_reco_mass": ak.where(valid, thad_m, 0),
+            "top_thad_dr_bqq": ak.where(valid, thad_dr_bqq, 0),
+        }
+
+
+
     def process(self, events):
         # 1. You can use lambda here freely for convenience while processing
         #    (It's fine as long as we don't try to return it directly)
@@ -217,8 +391,8 @@ class FullLogicProcessor(processor.ProcessorABC):
         mu["iso"] = mu.pfRelIso04_all
 
         # ID Selection
-        good_ele = ele[(ele.pt > 25) & (abs(ele.eta) < 2.1) & (ele.mvaFall17V2Iso_WP90) & (abs(ele.dxy) < 0.045) & (abs(ele.dz)<0.2) & (ele.iso < 0.15)]
-        good_mu = mu[(mu.pt > 25) & (abs(mu.eta) < 2.1) & (mu.iso < 0.15) & (mu.mediumId) & (abs(mu.dxy) < 0.045) & (abs(mu.dz)<0.2)]
+        good_ele = ele[(ele.pt > 35) & (abs(ele.eta) < 2.5) & (ele.mvaFall17V2Iso_WP90) & (abs(ele.dxy) < 0.045) & (abs(ele.dz)<0.2)]
+        good_mu = mu[(mu.pt > 30) & (abs(mu.eta) < 2.4) & (mu.iso < 0.15) & (mu.mediumId) & (abs(mu.dxy) < 0.045) & (abs(mu.dz)<0.2)]
         good_tau = events.Tau[
             (events.Tau.pt > 30) & (abs(events.Tau.eta) < 2.3) & (abs(events.Tau.dz) < 0.2) & ((events.Tau.decayMode < 5) | (events.Tau.decayMode >= 10))
             & (events.Tau.idDeepTau2017v2p1VSjet >= 16) & (events.Tau.idDeepTau2017v2p1VSe >= 32) & (events.Tau.idDeepTau2017v2p1VSmu >= 1)]
@@ -240,7 +414,6 @@ class FullLogicProcessor(processor.ProcessorABC):
         good_tau = ak.drop_none(good_tau, axis=1)
         good_jet = ak.drop_none(good_jet, axis=1)
         good_light_jet = good_jet[good_jet.btagDeepFlavB < self.cfg['btag_wp']]
-
         good_bjet = good_jet[good_jet.btagDeepFlavB > self.cfg['btag_wp']]
 
         def make_lep_p4(coll):
@@ -252,6 +425,14 @@ class FullLogicProcessor(processor.ProcessorABC):
                 "charge": coll.charge,
                 "iso": coll.iso
             }, with_name="PtEtaPhiMLorentzVector")
+        def make_jet_p4(coll):
+            return ak.zip({
+                "pt": coll.pt,
+                "eta": coll.eta,
+                "phi": coll.phi,
+                "mass": coll.mass
+            }, with_name="PtEtaPhiMLorentzVector")
+
         good_ele = make_lep_p4(good_ele)
         good_mu = make_lep_p4(good_mu)
         # Lepton Merging (Keep 'iso' field)
@@ -259,13 +440,23 @@ class FullLogicProcessor(processor.ProcessorABC):
         # Sort by pT for standard selection logic
         leptons = leptons[ak.argsort(leptons.pt, axis=1, ascending=False)]
 
+        leading_lepton = ak.firsts(leptons)
+        light_jets_p4 = make_jet_p4(good_light_jet)
+        dr = light_jets_p4.delta_r(leading_lepton)
+        sorted_jets = light_jets_p4[ak.argsort(dr, axis=1)]
+        nearest_jet = ak.firsts(sorted_jets)
+        dr_lj = ak.fill_none(leading_lepton.delta_r(nearest_jet), 999)
+        topness = self.topness(leptons, good_jet, events.MET)["topness"]
+
         # --- 2. Event Selection ---
         selection = PackedSelection()
         selection.add("one_lep", ak.num(leptons) == 1)
         selection.add("had_tau_veto", ak.num(good_tau) == 0)
         selection.add("two_ljets", ak.num(good_light_jet) >= 2)
         selection.add("two_bjets", ak.num(good_bjet) >= 2)
-        cut = selection.all("one_lep", "had_tau_veto", "two_ljets", "two_bjets")
+        selection.add("dr_lj", dr_lj < 1.6)
+        selection.add("topness", topness > 3)
+        cut = selection.all("one_lep", "had_tau_veto", "two_ljets", "two_bjets", "dr_lj", "topness")
 
         sel_ev = events[cut]
         if len(sel_ev) == 0: return {
@@ -440,8 +631,6 @@ class FullLogicProcessor(processor.ProcessorABC):
         # ==============================================================================
         # 0. Setup & Constants
         # ==============================================================================
-        MW_PDG = 80.4
-        MH_PDG = 125.0
 
         # --- Helpers ---
         def get_p4(obj):
@@ -483,27 +672,7 @@ class FullLogicProcessor(processor.ProcessorABC):
             {"pt": met.pt, "eta": ak.zeros_like(met.pt), "phi": met.phi, "mass": 0.0},
             with_name="PtEtaPhiMLorentzVector",
         )
-
-        # --- Neutrino Reconstruction (Needed for Hypo B2 selection) ---
-        # IMPORTANT BUGFIX: use l1_p4 (not l1.pz / l1.energy) for schema robustness
-        metpt_safe = ak.where(met.pt > 0, met.pt, 1e-6)
-
-        mu = (MW_PDG ** 2) / 2.0 + l1_p4.pt * met.pt * np.cos(l1_p4.phi - met.phi)
-        A = mu * l1_p4.pz / (l1_p4.pt ** 2)
-        B = (mu ** 2 * l1_p4.pz ** 2) / (l1_p4.pt ** 4) - (
-                (l1_p4.energy ** 2 * met.pt ** 2 - mu ** 2) / (l1_p4.pt ** 2)
-        )
-        pz_nu = ak.where(B < 0, A, A - np.sqrt(np.maximum(B, 0)))
-        nu_p4 = ak.zip(
-            {
-                "pt": met.pt,
-                "eta": np.arcsinh(pz_nu / metpt_safe),
-                "phi": met.phi,
-                "mass": 0.0,
-            },
-            with_name="PtEtaPhiMLorentzVector",
-        )
-
+        nu_p4 = self.solve_neutrino(l1_p4, met)
         # Full leptonic W (for B2 selection logic)
         w_lep_full_p4 = l1_p4 + nu_p4
 
@@ -513,6 +682,9 @@ class FullLogicProcessor(processor.ProcessorABC):
 
         # IMPORTANT BUGFIX: count b-jets BEFORE padding (padding makes length look like 2 always)
         data = {}
+        topness_arrays = self.topness(leptons, jets, met)
+        for k, v in topness_arrays.items():
+            data[k] = safe(v)
         data["n_b_jets"] = safe(ak.sum(is_btag, axis=1))
 
         # IMPORTANT CHANGE: choose bb pair as top-2 by btag score (not by pT)
@@ -524,11 +696,10 @@ class FullLogicProcessor(processor.ProcessorABC):
 
         # --- Light Jet Pairs (Candidate Pool) ---
         l_cands = jets_sorted[~is_btag]
+        # take up to top-8 light jets per event (no padding => no Nones => no unions)
+        l_cands_top8 = l_cands[:, :8]
 
-        # take up to top-5 light jets per event (no padding => no Nones => no unions)
-        l_cands_top5 = l_cands[:, :6]
-
-        qq_pairs = ak.combinations(l_cands_top5, 2, axis=1)
+        qq_pairs = ak.combinations(l_cands_top8, 2, axis=1)
         q1, q2 = ak.unzip(qq_pairs)
         q1_p4, q2_p4 = get_p4(q1), get_p4(q2)
         whad_cands_p4 = q1_p4 + q2_p4
@@ -539,20 +710,19 @@ class FullLogicProcessor(processor.ProcessorABC):
         # (A) W_had On-shell (Closest to MW)
         idx_A = ak.argmin(abs(whad_cands_p4.mass - MW_PDG), axis=1, keepdims=True)
 
-        # (B1) W_had Geometric (Min Delta R)
-        idx_B1 = ak.argmin(q1_p4.delta_r(q2_p4), axis=1, keepdims=True)
-
-        # (B2) Higgs Constraint (Min |M(lnu+qq) - MH|)
+        # (B) Higgs Constraint (Min |M(lnu+qq) - MH|)
         w_lep_broad = ak.broadcast_arrays(w_lep_full_p4, whad_cands_p4)[0]
         h_cands = w_lep_broad + whad_cands_p4
-        idx_B2 = ak.argmin(abs(h_cands.mass - MH_PDG), axis=1, keepdims=True)
+        idx_B = ak.argmin(abs(h_cands.mass - MH_PDG), axis=1, keepdims=True)
 
         # ==============================================================================
         # 3. Feature Assembly
         # ==============================================================================
         # Save raw low-level
         data.update(save_p4("lep", l1_p4))
-        data.update(save_p4("met", met_p4))
+        data["met_pt"] = safe(met.pt)
+        data["met_phi"] = safe(met.phi)
+        data["W_mT"] = safe(calc_mt(l1_p4, met_p4))
         data.update(save_p4("b1", b1_p4))
         data.update(save_p4("b2", b2_p4))
 
@@ -560,7 +730,8 @@ class FullLogicProcessor(processor.ProcessorABC):
         data["bb_inv"] = safe(bb_sys_p4.mass)
         data["bb_dR"] = safe(b1_p4.delta_r(b2_p4))
 
-        hypos = {"A": idx_A, "B1": idx_B1, "B2": idx_B2}
+
+        hypos = {"A": idx_A, "B": idx_B}
 
         for name, idx in hypos.items():
             # Retrieve the specific W_had candidate
@@ -651,7 +822,7 @@ def main():
         "btag_wp": 0.2489,  # 2016postapv WPs, medium
         "max_objs": 18,
         "max_jets": 16,
-        "seed": 123,
+        "seed": 42,
         "train_frac": 0.5
     }
 
