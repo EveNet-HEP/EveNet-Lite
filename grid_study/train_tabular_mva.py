@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import time
-
+import pickle
+from tabpfn.model_loading import (
+    load_fitted_tabpfn_model,
+    save_fitted_tabpfn_model,
+)
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
@@ -458,10 +462,22 @@ def run_pipeline(args):
                 logger.error("TabPFN requested but not installed.")
                 sys.exit(1)
             logger.info("Training TabPFN...")
-            X_sub, y_sub, _ = dm.downsample_for_tabpfn(X_tr, y_tr, w_tr, limit=args.tabpfn_limit)
+            # downsampling background based on weights
+            X_sig, y_sig, w_sig = X_tr[y_tr == 1], y_tr[y_tr == 1], w_tr[y_tr == 1]
+            X_bkg, y_bkg, w_bkg = X_tr[y_tr == 0], y_tr[y_tr == 0], w_tr[y_tr == 0]
+            if len(X_sig) > args.tabpfn_limit // 2:
+                X_sig, y_sig, w_sig = dm.downsample_for_tabpfn(X_sig, y_sig, w_sig, limit=args.tabpfn_limit // 2)
+            remaining_number = args.tabpfn_limit - len(X_sig)
+            X_bkg_sub, y_bkg_sub, w_bkg_sub = dm.downsample_for_tabpfn(X_bkg, y_bkg, w_bkg, limit=remaining_number)
+            X_sub = np.concatenate([X_sig, X_bkg_sub])
+            y_sub =  np.concatenate([y_sig, y_bkg_sub])
             model = TabPFNClassifier(balance_probabilities=True) #'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu')
             print("cuda:", os.environ.get('CUDA_VISIBLE_DEVICES'))
             model.fit(X_sub, y_sub)
+            # Save via Pickle ---
+            model_path = out_dir / "model.tabpfn_fit"
+            save_fitted_tabpfn_model(model, model_path)
+            logger.info(f"TabPFN model saved to {out_dir / 'model.pkl'}")
 
         finish_time = time.time()
         fitting_time = finish_time - start_time
@@ -482,7 +498,15 @@ def run_pipeline(args):
                 if not HAS_TABPFN:
                     logger.error("TabPFN requested but not installed.")
                     sys.exit(1)
-                model = TabPFNClassifier(balance_probabilities=True) # TODO add evaluation check point
+                model_path = out_dir / "model.tabpfn_fit"
+                if not model_path.exists():
+                    logger.error(f"TabPFN model not found at {model_path}")
+                    sys.exit(1)
+
+                device = "cpu" if os.environ.get('CUDA_VISIBLE_DEVICES') is None else "cuda"
+                logger.info(f">>> Loading TabPFN model on {device}...")
+                model = load_fitted_tabpfn_model(model_path, device=device)
+
         logger.info(">>> Loading Test Data...")
         d_sig_te = dm.load_data(sig_datasets_eval, "valid", lumi=args.lumi)
         d_bkg_te = dm.load_data(bkg_datasets, "valid", lumi=args.lumi)
@@ -521,7 +545,10 @@ def run_pipeline(args):
                 # Batch prediction
                 batch = 50000
                 preds = []
-                for i in range(0, len(X_eval), batch):
+                # Use tqdm for progress bar
+                import tqdm
+                logger.info(f"TabPFN large eval set detected ({len(X_eval)} samples). Using batch prediction...")
+                for i in tqdm.tqdm(range(0, len(X_eval), batch)):
                     preds.append(model.predict_proba(X_eval[i:i + batch])[:, 1])
                 y_pred = np.concatenate(preds)
             else:
@@ -578,7 +605,7 @@ def run_pipeline(args):
                 min_bkg_events=10,
                 log_plots=True,
                 bins=1000,
-                min_bkg_ratio=0.0001,
+                # min_bkg_ratio=0.0001,
                 f_name=f"{out_dir}/sic_MX-{int(mx)}_MY-{int(my)}.png",
                 Zs=10,
                 Zb=5,

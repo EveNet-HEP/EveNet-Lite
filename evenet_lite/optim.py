@@ -3,6 +3,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, List, Sequence, Tuple
 import torch
+from rich.console import Console
+from rich.table import Table
+from collections import defaultdict
 
 DEFAULT_HEAD_LR = 1e-3
 DEFAULT_WEIGHT_DECAY = 1e-2
@@ -70,11 +73,40 @@ def set_peft_trainable(model: torch.nn.Module, train_layernorm: bool = True):
 
 def print_trainable(model):
     m = unwrap_model(model)
-    total = 0
-    for n, p in m.named_parameters():
-        if p.requires_grad:
-            total += p.numel()
-    print(f"Trainable params: {total:,}")
+
+    group_params = defaultdict(int)
+    total_params = 0
+    console = Console()
+
+    # Group by top-level module name
+    for name, param in m.named_parameters():
+        if not param.requires_grad:
+            continue
+        total_params += param.numel()
+        top_group = name.split('.')[2] # e.g., backbone, Classification, etc.
+        if top_group == 'backbone' and hasattr(m, 'models'):
+            top_group = name.split('.')[3] # e.g., ObjectEncoder, PET, etc.
+        group_params[top_group] += param.numel()
+
+    # Build rich table
+    table = Table(title="Trainable Parameters by Module", show_lines=False)
+    table.add_column("Module", justify="left", style="cyan", no_wrap=True)
+    table.add_column("Params", justify="right", style="magenta")
+    table.add_column("% of Total", justify="right", style="green")
+
+    for group, count in sorted(group_params.items(), key=lambda x: -x[1]):
+        pct = count / total_params * 100
+        table.add_row(group, f"{count:,}", f"{pct:.2f}%")
+
+    table.add_section()
+    table.add_row("[bold]Total[/bold]", f"[bold]{total_params:,}[/bold]", "100.00%")
+
+    console.print(table)
+    #
+    # for n, p in m.named_parameters():
+    #     if p.requires_grad:
+    #         total += p.numel()
+    # print(f"Trainable params: {total:,}")
 
 def _collect_parameters(model: torch.nn.Module, module_names: Iterable[str]) -> List[torch.nn.Parameter]:
     params: List[torch.nn.Parameter] = []

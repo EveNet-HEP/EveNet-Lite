@@ -368,6 +368,8 @@ def run_pipeline(args):
         mode_str = "individual"
     mass_target = "All" if args.parameterize else f"MX-{args.mX}_MY-{args.mY}"
     model_str = "evenet-pretrain" if args.pretrain else "evenet-scratch"
+    if args.pretrain and args.SSL:
+        model_str = "evenet-SSL"
     out_dir = Path(args.out_dir) / model_str / mode_str / mass_target
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
@@ -574,6 +576,9 @@ def run_pipeline(args):
         if args.use_adapter:
             body_frozen_factor = 0.3
         mediate_frozen_factor = 0.3 if args.freeze_type == "partial" else 0.1 if args.freeze_type == "all" else 1.0
+        if args.freeze_type == "mild_freeze":
+            body_frozen_factor = 0.3
+            mediate_frozen_factor = 0.6
         learning_rates = [learning_rate] if not args.pretrain else [body_frozen_factor * learning_rate, mediate_frozen_factor * learning_rate,
                                                                     learning_rate]
 
@@ -650,7 +655,7 @@ def run_pipeline(args):
                 'dir': "/pscratch/sd/t/tihsu/tmp/wandb"
             },
             pretrained=args.pretrain,
-            pretrained_path="/global/cfs/cdirs/m5019/avencast/Checkpoints/checkpoints.20M.ablation.4.newcls/last.ckpt",
+            pretrained_path="/global/cfs/cdirs/m5019/avencast/Checkpoints/checkpoints.20M.ablation.4.newcls/last.ckpt" if not args.SSL else "/global/cfs/cdirs/m5019/avencast/Checkpoints/checkpoints.20M.ablation.1/last.ckpt",
             pretrained_source="local",
             module_lists=module_lists,
             lr=learning_rates,
@@ -815,7 +820,7 @@ def run_pipeline(args):
                 min_bkg_events=10,
                 log_plots=True,
                 bins=1000,
-                min_bkg_ratio=0.0001,
+                # min_bkg_ratio=0.0001,
                 f_name=str(out_dir / f"sic_plots_MX-{int(round(mx_val))}_MY-{int(round(my_val))}.png"),
                 Zs=10,
                 Zb=5,
@@ -909,13 +914,14 @@ if __name__ == "__main__":
 
     parser.add_argument("--stage", type=str, default=["train", "predict", "evaluate"], nargs="+",
                         help="Pipeline stages to run")
-    parser.add_argument("--freeze_type", type=str, default="partial", choices=["none", "partial", "all"],)
+    parser.add_argument("--freeze_type", type=str, default="partial", choices=["none", "partial", "all", "mild_freeze"],)
     parser.add_argument("--max_bkg_entries", type=int, default=None, help="Max entries to load for training/testing")
     # logging
     parser.add_argument("--wandb_test", action="store_true")
     parser.add_argument("--use_adapter", action="store_true")
     parser.add_argument("--continue_training", action="store_true")
     parser.add_argument("--bkg_vs_sig_rate", default = None)
+    parser.add_argument("--SSL", action="store_true", help="Use SSL pretrained model weights")
     args = parser.parse_args()
 
     if not args.parameterize and (args.mX is None or args.mY is None):

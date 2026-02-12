@@ -482,8 +482,8 @@ class Trainer:
             # set peft
             if getattr(self.config, "use_peft", True):
                 set_peft_trainable(self.model, train_layernorm=True)
-                if self.is_rank_zero():
-                    print_trainable(self.model)
+            if self.is_rank_zero():
+                print_trainable(self.model)
 
             self._setup_optimizers_and_schedulers(epochs, steps_per_epoch)
 
