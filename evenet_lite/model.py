@@ -103,7 +103,16 @@ class EveNetBackbone(nn.Module):
             layer_scale_init=pet_config.layer_scale_init,
             dropout=pet_config.dropout,
             mode=pet_config.mode,
-            use_adapter=use_adapter
+            use_adapter=use_adapter,
+            use_moe=pet_config.use_moe,
+            moe_base_num_experts=pet_config.moe_base_num_experts,
+            moe_base_select_top_k=pet_config.moe_base_select_top_k,
+            moe_num_shared_experts=pet_config.moe_num_shared_experts,
+            moe_expert_segmentation_factor=pet_config.moe_expert_segmentation_factor,
+            moe_scale_expert_dim=pet_config.moe_scale_expert_dim,
+            moe_alpha=pet_config.moe_alpha,
+            moe_cz=pet_config.moe_cz,
+            moe_use_router_noise=pet_config.moe_use_router_noise,
         )
 
         # [3] Classification + Regression + Assignment Body
@@ -243,14 +252,30 @@ class EveNetLite(nn.Module):
         return None
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor, globals: torch.Tensor) -> torch.Tensor:
+        _moe_l_aux = x.new_zeros(())
+        _moe_cz_lz = x.new_zeros(())
+
         if self.ensemble_mode == "independent":
-            outputs = [model(x=x, x_mask=x_mask, globals=globals) for model in self.models]
+            outputs = []
+            for m in self.models:
+                logit = m(x=x, x_mask=x_mask, globals=globals)
+                outputs.append(logit)
+                _moe_l_aux = _moe_l_aux + m.backbone.PET.moe_l_aux
+                _moe_cz_lz = _moe_cz_lz + m.backbone.PET.moe_cz_lz
+            if self.n_ensemble > 1:
+                _moe_l_aux = _moe_l_aux / self.n_ensemble
+                _moe_cz_lz = _moe_cz_lz / self.n_ensemble
         else:
             embeddings, input_point_cloud_mask, event_token = self.backbone(x, x_mask, globals)
             outputs = [
                 _apply_classification_head(head, embeddings, input_point_cloud_mask, event_token)
                 for head in self.Classification
             ]
+            _moe_l_aux = self.backbone.PET.moe_l_aux
+            _moe_cz_lz = self.backbone.PET.moe_cz_lz
+
+        self.moe_l_aux = _moe_l_aux
+        self.moe_cz_lz = _moe_cz_lz
 
         if self.n_ensemble == 1:
             return outputs[0]
