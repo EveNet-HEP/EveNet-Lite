@@ -129,15 +129,23 @@ def build_sampler(
         dataset: EvenetTensorDataset,
         weights: Optional[torch.Tensor],
         epoch_size: Optional[int] = None,
+        class_weight_factors: Optional[torch.Tensor] = None,
 ) -> Optional[Sampler[int]]:
     if sampler == "weighted":
+        labels = dataset.labels.long()
+        factors = None
+        if class_weight_factors is not None:
+            factors = torch.as_tensor(class_weight_factors, dtype=torch.float32)
         if weights is None:
             # derive weights from labels
-            labels = dataset.labels
             class_counts = torch.bincount(labels.long())
             class_weights = class_counts.float().reciprocal().clamp_max(class_counts.numel())
             sample_weights = class_weights[labels.long()]
         else:
             sample_weights = torch.as_tensor(weights).float()
+        if factors is not None:
+            if factors.numel() <= int(labels.max().item()):
+                raise ValueError("class_weight_factors must match the class index range")
+            sample_weights = sample_weights * factors[labels]
         return DistributedWeightedSampler(sample_weights, epoch_size=epoch_size)
     return None

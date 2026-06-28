@@ -59,6 +59,8 @@ def run_evenet_lite_training(
     eval_batch_size: Optional[int] = None,
     sic_min_bkg_events: int = 100,
     physics_metric_config: Optional[Dict[str, Any]] = None,
+    class_weight_factors: Optional[List[float]] = None,
+    classification_score_bins: int = 100,
     debug: bool = False,
     log_level: int = logging.INFO,
     loss_gamma: float = 0.0,
@@ -155,6 +157,8 @@ def run_evenet_lite_training(
         eval_batch_size=eval_batch_size,
         sic_min_bkg_events=sic_min_bkg_events,
         physics_metric_config=physics_metric_config,
+        class_weight_factors=class_weight_factors,
+        classification_score_bins=classification_score_bins,
         debug=debug,
     )
     return classifier

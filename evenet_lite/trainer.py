@@ -16,6 +16,10 @@ from .data import EvenetTensorDataset, build_sampler, DistributedWeightedSampler
 from .checkpoint import load_checkpoint, save_checkpoint
 from .metrics import (
     calculate_physics_metrics,
+    classification_auc_from_score_histograms,
+    classification_metrics_from_confusion_matrix,
+    compute_sic_from_scores,
+    compute_sic_from_score_histograms,
     compute_accuracy,
     compute_classification_metrics,
     compute_loss,
@@ -97,6 +101,8 @@ class TrainerConfig:
     physics_bins: int = 1000
     sic_min_bkg_events: int = 100
     physics_metric_config: Dict[str, Any] = field(default_factory=dict)
+    class_weight_factors: Optional[List[float]] = None
+    classification_score_bins: int = 100
     loss_gamma: float = 0.0
     eval_batch_size: Optional[int] = None
     eval_output_path: Optional[str] = None
@@ -282,6 +288,25 @@ class Trainer:
             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         return tensor
 
+    def _distributed_barrier(self) -> None:
+        if self.world_size <= 1:
+            return
+        if dist.get_backend() == "nccl" and self.device.type == "cuda":
+            device_id = self.device.index if self.device.index is not None else self.local_rank
+            dist.barrier(device_ids=[device_id])
+        else:
+            dist.barrier()
+
+    @staticmethod
+    def _classification_probabilities_tensor(logits: torch.Tensor) -> torch.Tensor:
+        if logits.dim() == 1:
+            sig = torch.sigmoid(logits)
+            return torch.stack([1.0 - sig, sig], dim=1)
+        if logits.shape[1] == 1:
+            sig = torch.sigmoid(logits[:, 0])
+            return torch.stack([1.0 - sig, sig], dim=1)
+        return torch.softmax(logits, dim=1)
+
     def _reduce_mean_scalar(self, value: float) -> float:
         tensor = torch.tensor(value, device=self.device)
         tensor = self._all_reduce_tensor(tensor)
@@ -298,6 +323,18 @@ class Trainer:
         self.train_dataset = EvenetTensorDataset(X_train, y_train, w_train)
         self.val_dataset = EvenetTensorDataset(*val_data) if val_data is not None else None
         self.test_dataset = EvenetTensorDataset(*test_data) if test_data is not None else None
+
+    def _class_weight_factor_tensor(self, device: torch.device) -> Optional[torch.Tensor]:
+        factors = self.config.class_weight_factors
+        if not factors:
+            return None
+        factor_tensor = torch.as_tensor(factors, dtype=torch.float32)
+        num_classes = self.num_classes or factor_tensor.numel()
+        if factor_tensor.numel() != num_classes:
+            raise ValueError(
+                f"class_weight_factors must have {num_classes} values in class_labels order; got {factor_tensor.numel()}"
+            )
+        return factor_tensor.to(device)
 
     def _maybe_wrap_ddp(self) -> torch.nn.Module:
         if isinstance(self.model, DDP):
@@ -451,7 +488,13 @@ class Trainer:
                 self.callbacks.insert(0, NormalizationCallback())
 
             self.model = self._maybe_wrap_ddp()
-            sampler_obj = build_sampler(sampler, self.train_dataset, self.train_dataset.sample_weights, epoch_size)
+            sampler_obj = build_sampler(
+                sampler,
+                self.train_dataset,
+                self.train_dataset.sample_weights,
+                epoch_size,
+                class_weight_factors=self.config.class_weight_factors,
+            )
             if sampler_obj is None and self.world_size > 1:
                 sampler_obj = DistributedSampler(self.train_dataset)
 
@@ -678,8 +721,7 @@ class Trainer:
 
         if dist.is_available() and dist.is_initialized():
             try:
-                if self.world_size > 1:
-                    dist.barrier()
+                self._distributed_barrier()
             except Exception as exc:  # pragma: no cover - best-effort cleanup
                 logging.warning("Distributed barrier failed during shutdown: %s", exc)
             try:
@@ -897,13 +939,34 @@ class Trainer:
 
         metric_sum: Dict[str, float] = {"loss": 0.0, "accuracy": 0.0}
         metric_count: Dict[str, int] = {"loss": 0, "accuracy": 0}
-        epoch_probs: List[torch.Tensor] = []
-        epoch_targets: List[torch.Tensor] = []
-        epoch_weights: List[torch.Tensor] = []
+        physics_probs: List[torch.Tensor] = []
+        physics_targets: List[torch.Tensor] = []
+        physics_weights: List[torch.Tensor] = []
+        collect_physics = self.config.compute_physics_metrics and self.num_classes == 2
+        classification_confusion: Optional[torch.Tensor] = None
+        classification_entries: Optional[torch.Tensor] = None
+        score_histograms: Optional[torch.Tensor] = None
+        score_histograms_w2: Optional[torch.Tensor] = None
+        score_bins = max(1, int(self.config.classification_score_bins))
+        if self.num_classes is not None:
+            classification_confusion = torch.zeros(
+                self.num_classes * self.num_classes,
+                dtype=torch.float64,
+                device=self.device,
+            )
+            classification_entries = torch.zeros_like(classification_confusion)
+            score_histograms = torch.zeros(
+                self.num_classes * self.num_classes * score_bins,
+                dtype=torch.float64,
+                device=self.device,
+            )
+            score_histograms_w2 = torch.zeros_like(score_histograms)
 
         metric_tracker = self.train_accuracy if training else self.val_accuracy
         if metric_tracker is not None:
             metric_tracker.reset()
+
+        class_factors = self._class_weight_factor_tensor(self.device)
 
         progress = None
         if self.is_rank_zero():
@@ -934,6 +997,11 @@ class Trainer:
                 weight_tensor = torch.where(finite_mask, weights, torch.zeros_like(weights))
                 if not torch.all(finite_mask):
                     logging.debug("Non-finite weights detected; treating them as zero during loss computation.")
+            if class_factors is not None:
+                if int(targets.max().item()) >= class_factors.numel():
+                    raise ValueError("class_weight_factors must match the class index range")
+                base_weight = weight_tensor if weight_tensor is not None else torch.ones_like(targets, dtype=torch.float32)
+                weight_tensor = base_weight * class_factors[targets]
 
             with torch.set_grad_enabled(training):
                 outputs = self._forward(model, features)
@@ -984,14 +1052,63 @@ class Trainer:
             reduced_loss = self._reduce_mean_scalar(loss.item())
             reduced_accuracy = self._reduce_mean_scalar(batch_accuracy)
 
-            epoch_probs.append(logits_for_metrics.detach())
-            epoch_targets.append(targets.detach())
             metric_weights = (
                 weight_tensor.detach()
                 if weight_tensor is not None
                 else torch.ones_like(targets, dtype=torch.float32, device=self.device)
             )
-            epoch_weights.append(metric_weights)
+            if classification_confusion is not None:
+                valid = (
+                    (targets >= 0)
+                    & (targets < self.num_classes)
+                    & (preds >= 0)
+                    & (preds < self.num_classes)
+                    & torch.isfinite(metric_weights)
+                    & (metric_weights >= 0)
+                )
+                if torch.any(valid):
+                    encoded = targets[valid] * self.num_classes + preds[valid]
+                    classification_confusion += torch.bincount(
+                        encoded,
+                        weights=metric_weights[valid].to(torch.float64),
+                        minlength=self.num_classes * self.num_classes,
+                    )
+                    classification_entries += torch.bincount(
+                        encoded,
+                        minlength=self.num_classes * self.num_classes,
+                    ).to(torch.float64)
+
+            if score_histograms is not None and score_histograms_w2 is not None:
+                probabilities = self._classification_probabilities_tensor(logits_for_metrics.detach().float())
+                score_classes = min(self.num_classes, probabilities.shape[1])
+                valid = (
+                    (targets >= 0)
+                    & (targets < self.num_classes)
+                    & torch.isfinite(metric_weights)
+                    & (metric_weights >= 0)
+                )
+                if score_classes > 0 and torch.any(valid):
+                    scores = probabilities[valid, :score_classes].clamp(0.0, 1.0)
+                    bins = torch.clamp((scores * score_bins).long(), max=score_bins - 1)
+                    true_offset = targets[valid].view(-1, 1) * self.num_classes * score_bins
+                    score_offset = torch.arange(score_classes, device=self.device).view(1, -1) * score_bins
+                    encoded = true_offset + score_offset + bins
+                    hist_weights = metric_weights[valid].to(torch.float64).view(-1, 1).expand_as(scores)
+                    score_histograms += torch.bincount(
+                        encoded.reshape(-1),
+                        weights=hist_weights.reshape(-1),
+                        minlength=self.num_classes * self.num_classes * score_bins,
+                    )
+                    score_histograms_w2 += torch.bincount(
+                        encoded.reshape(-1),
+                        weights=(hist_weights ** 2).reshape(-1),
+                        minlength=self.num_classes * self.num_classes * score_bins,
+                    )
+
+            if collect_physics:
+                physics_probs.append(logits_for_metrics.detach())
+                physics_targets.append(targets.detach())
+                physics_weights.append(metric_weights.detach())
 
             batch_metrics = {"loss": loss.item(), "accuracy": batch_accuracy}
             for cb in self.callbacks:
@@ -1007,6 +1124,13 @@ class Trainer:
                 progress.set_postfix({"loss": f"{reduced_loss:.4f}"}, refresh=False)
                 progress.update(1)
 
+        if progress is not None:
+            progress.close()
+            progress = None
+        if self.is_rank_zero():
+            stage = "train" if training else "validation"
+            logging.info("Computing %s epoch metrics from full entries", stage)
+
         metric_sum_tensor = torch.tensor([metric_sum["loss"], metric_sum["accuracy"]], device=self.device)
         metric_count_tensor = torch.tensor([metric_count["loss"], metric_count["accuracy"]], device=self.device)
         metric_sum_tensor = self._all_reduce_tensor(metric_sum_tensor)
@@ -1020,17 +1144,58 @@ class Trainer:
         if metric_tracker is not None:
             metrics["accuracy"] = float(metric_tracker.compute().item())
 
-        if epoch_probs:
+        confusion_matrix = None
+        entries_matrix = None
+        if classification_confusion is not None:
+            classification_confusion = self._all_reduce_tensor(classification_confusion)
+            if self.is_rank_zero():
+                confusion_matrix = classification_confusion.reshape(self.num_classes, self.num_classes).cpu().numpy()
+        if classification_entries is not None:
+            classification_entries = self._all_reduce_tensor(classification_entries)
+            if self.is_rank_zero():
+                entries_matrix = classification_entries.reshape(self.num_classes, self.num_classes).cpu().numpy()
+
+        score_histograms_np = None
+        score_histograms_w2_np = None
+        if score_histograms is not None and score_histograms_w2 is not None:
+            score_histograms = self._all_reduce_tensor(score_histograms)
+            score_histograms_w2 = self._all_reduce_tensor(score_histograms_w2)
+            if self.is_rank_zero():
+                score_histograms_np = score_histograms.reshape(
+                    self.num_classes,
+                    self.num_classes,
+                    score_bins,
+                ).cpu().numpy()
+                score_histograms_w2_np = score_histograms_w2.reshape(
+                    self.num_classes,
+                    self.num_classes,
+                    score_bins,
+                ).cpu().numpy()
+
+        if confusion_matrix is not None:
             metrics.update(
-                self._compute_epoch_classification_metrics(epoch_probs, epoch_targets, epoch_weights, training=training)
+                self._compute_epoch_classification_metrics(
+                    confusion_matrix=confusion_matrix,
+                    entries_matrix=entries_matrix,
+                    score_histograms=score_histograms_np,
+                    score_bins=score_bins,
+                    training=training,
+                )
             )
 
-        if self.config.compute_physics_metrics and epoch_probs and self.num_classes == 2:
+        if self.config.compute_physics_metrics and self.num_classes and self.num_classes > 2 and score_histograms_np is not None:
             metrics.update(
-                self._compute_epoch_physics_metrics(epoch_probs, epoch_targets, epoch_weights, training=training)
+                self._compute_epoch_multiclass_physics_metrics(
+                    score_histograms_np,
+                    score_histograms_w2_np,
+                    training=training,
+                )
             )
-        if progress is not None:
-            progress.close()
+
+        if self.config.compute_physics_metrics and physics_probs and self.num_classes == 2:
+            metrics.update(
+                self._compute_epoch_physics_metrics(physics_probs, physics_targets, physics_weights, training=training)
+            )
         return metrics
 
     def _log_train_step(self, step: int, loss: float, accuracy: float, epoch: int) -> None:
@@ -1080,8 +1245,27 @@ class Trainer:
             "bins": self.config.physics_bins,
             "min_bkg_events": self.config.sic_min_bkg_events,
         }
-        kwargs.update(self.config.physics_metric_config or {})
+        for key, value in (self.config.physics_metric_config or {}).items():
+            if key not in {"SIC_base", "sic_base"}:
+                kwargs[key] = value
         return kwargs
+
+    def _sic_base_indices(self) -> List[int]:
+        raw = (self.config.physics_metric_config or {}).get("SIC_base")
+        if raw is None:
+            raw = (self.config.physics_metric_config or {}).get("sic_base")
+        if not raw:
+            return []
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        label_to_idx = {label: idx for idx, label in enumerate(self.class_labels or [])}
+        indices: List[int] = []
+        for item in raw:
+            idx = label_to_idx[item] if isinstance(item, str) else int(item)
+            if self.num_classes is None or idx < 0 or idx >= self.num_classes:
+                raise ValueError(f"SIC_base class {item!r} is outside class_labels")
+            indices.append(idx)
+        return sorted(set(indices))
 
     def _metric_label(self, label: str) -> str:
         return "".join(ch if ch.isalnum() else "_" for ch in label).strip("_") or "class"
@@ -1118,17 +1302,24 @@ class Trainer:
 
     def _log_classification_plots(
             self,
-            probs: np.ndarray,
-            targets: np.ndarray,
-            weights: np.ndarray,
             metric_arrays: Dict[str, Any],
             stage: str,
+            probs: Optional[np.ndarray] = None,
+            targets: Optional[np.ndarray] = None,
+            weights: Optional[np.ndarray] = None,
     ) -> None:
         if self.wandb_run is None or not self.is_rank_zero():
             return
         try:
             import wandb
-            from .plots import close_figure, plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
+            from .plots import (
+                close_figure,
+                plot_confusion_matrix,
+                plot_rejection_curves,
+                plot_rejection_curves_from_histograms,
+                plot_score_distributions,
+                plot_score_distributions_from_histograms,
+            )
         except Exception as exc:  # pragma: no cover - optional plotting dependency
             logging.warning("Skipping classification plots: %s", exc)
             return
@@ -1137,24 +1328,40 @@ class Trainer:
             f"Classification/{stage}-confusion": plot_confusion_matrix(
                 metric_arrays["confusion_matrix"],
                 self.class_labels,
+                entries_matrix=metric_arrays.get("confusion_entries"),
                 normalize=True,
                 title=f"{stage.title()} confusion matrix",
             ),
-            f"Classification/{stage}-background-rejection": plot_rejection_curves(
+        }
+        if "score_histograms" in metric_arrays:
+            figures[f"Classification/{stage}-background-rejection"] = plot_rejection_curves_from_histograms(
+                metric_arrays["score_histograms"],
+                self.class_labels,
+                title=f"{stage.title()} one-vs-rest background rejection",
+            )
+            figures[f"Classification/{stage}-score-distributions"] = plot_score_distributions_from_histograms(
+                metric_arrays["score_histograms"],
+                self.class_labels,
+                bin_edges=metric_arrays.get("score_bin_edges"),
+                title=f"{stage.title()} score distributions by true class",
+            )
+        elif probs is not None and targets is not None and weights is not None:
+            figures[f"Classification/{stage}-background-rejection"] = plot_rejection_curves(
                 probs,
                 targets,
                 weights,
                 self.class_labels,
                 title=f"{stage.title()} one-vs-rest background rejection",
-            ),
-            f"Classification/{stage}-score-distributions": plot_score_distributions(
+            )
+            figures[f"Classification/{stage}-score-distributions"] = plot_score_distributions(
                 probs,
                 targets,
                 weights,
                 self.class_labels,
                 title=f"{stage.title()} score distributions by true class",
-            ),
-        }
+            )
+        else:
+            logging.warning("Skipping classification score plots for %s: no score data available", stage)
         try:
             self.wandb_run.log(
                 {name: wandb.Image(fig) for name, fig in figures.items()},
@@ -1166,30 +1373,187 @@ class Trainer:
 
     def _compute_epoch_classification_metrics(
             self,
-            logits_list: List[torch.Tensor],
-            targets_list: List[torch.Tensor],
-            weights_list: List[torch.Tensor],
+            confusion_matrix: Optional[np.ndarray],
+            entries_matrix: Optional[np.ndarray],
+            score_histograms: Optional[np.ndarray],
+            score_bins: int,
             training: bool,
     ) -> Dict[str, float]:
-        logits = self._all_gather_tensor(torch.cat(logits_list).detach())
-        targets = self._all_gather_tensor(torch.cat(targets_list).detach())
-        weights = self._all_gather_tensor(torch.cat(weights_list).detach())
-
         if not self.is_rank_zero():
             return {}
+        if confusion_matrix is None:
+            return {}
 
-        logits_np = logits.cpu().numpy()
-        targets_np = targets.cpu().numpy()
-        weights_np = weights.cpu().numpy()
-        metric_arrays = compute_classification_metrics(
-            logits=logits_np,
-            targets=targets_np,
-            weights=weights_np,
-            class_labels=self.class_labels,
-        )
-        probs = metric_arrays["probabilities"]
-        self._log_classification_plots(probs, targets_np, weights_np, metric_arrays, "train" if training else "valid")
+        metric_arrays = classification_metrics_from_confusion_matrix(confusion_matrix, entries_matrix)
+        if score_histograms is not None:
+            class_auc = classification_auc_from_score_histograms(score_histograms)
+            finite_auc = np.isfinite(class_auc)
+            support = metric_arrays["class_support"]
+            metric_arrays.update({
+                "class_auc": class_auc,
+                "macro_auc": float(np.mean(class_auc[finite_auc])) if np.any(finite_auc) else 0.5,
+                "weighted_auc": float(np.sum(class_auc[finite_auc] * support[finite_auc]) / support[finite_auc].sum())
+                if np.any(finite_auc) and support[finite_auc].sum() > 0 else 0.5,
+                "score_histograms": score_histograms,
+                "score_bin_edges": np.linspace(0.0, 1.0, score_bins + 1),
+            })
+        else:
+            metric_arrays.update({
+                "class_auc": np.full(confusion_matrix.shape[0], np.nan, dtype=float),
+                "macro_auc": 0.5,
+                "weighted_auc": 0.5,
+            })
+
+        self._log_classification_plots(metric_arrays, "train" if training else "valid")
         return self._classification_scalar_metrics(metric_arrays)
+
+    def _write_sic_summary_plot(
+            self,
+            sic_result: Dict[str, np.ndarray],
+            stage: str,
+            label: str,
+            save_path: Optional[Path] = None,
+    ) -> None:
+        if (self.wandb_run is None and save_path is None) or not self.is_rank_zero():
+            return
+        try:
+            from .plots import close_figure, plot_sic_summary
+            wandb = None
+            if self.wandb_run is not None:
+                import wandb as wandb_module
+                wandb = wandb_module
+        except Exception as exc:  # pragma: no cover - optional plotting dependency
+            logging.warning("Skipping SIC plot for %s: %s", label, exc)
+            return
+        fig = plot_sic_summary(sic_result, title=f"{stage.title()} SIC: {label} vs SIC_base")
+        try:
+            if save_path is not None:
+                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            if self.wandb_run is not None:
+                self.wandb_run.log(
+                    {f"Physics/{stage}-SIC-{self._metric_label(label)}": wandb.Image(fig)},
+                    step=self.global_step,
+                )
+        finally:
+            close_figure(fig)
+
+    def _compute_epoch_multiclass_physics_metrics(
+            self,
+            score_histograms: np.ndarray,
+            score_histograms_w2: Optional[np.ndarray],
+            training: bool,
+    ) -> Dict[str, float]:
+        base_indices = self._sic_base_indices()
+        if not base_indices or self.num_classes is None:
+            return {}
+        kwargs = self._physics_metric_kwargs()
+        min_bkg_events = int(kwargs.get("min_bkg_events", self.config.sic_min_bkg_events))
+        min_bkg_ratio = kwargs.get("min_bkg_ratio")
+        class_names = self.class_labels or [str(i) for i in range(self.num_classes)]
+        stage = "train" if training else "valid"
+        metrics: Dict[str, float] = {}
+        best_sic = 0.0
+        best_sic_unc = 0.0
+        for sig_idx in range(self.num_classes):
+            if sig_idx in base_indices:
+                continue
+            sig_hist = score_histograms[sig_idx, sig_idx]
+            bkg_hist = score_histograms[base_indices, sig_idx].sum(axis=0)
+            bkg_w2_hist = (
+                score_histograms_w2[base_indices, sig_idx].sum(axis=0)
+                if score_histograms_w2 is not None
+                else bkg_hist
+            )
+            sic_result = compute_sic_from_score_histograms(
+                sig_hist,
+                bkg_hist,
+                bkg_w2_hist,
+                min_bkg_events=min_bkg_events,
+                min_bkg_ratio=min_bkg_ratio,
+            )
+            label = class_names[sig_idx] if sig_idx < len(class_names) else str(sig_idx)
+            suffix = self._metric_label(label)
+            metrics[f"max_sic_{suffix}"] = float(sic_result["max_sic"])
+            metrics[f"max_sic_unc_{suffix}"] = float(sic_result["max_sic_unc"])
+            auc = float(np.trapz(sic_result["sig_eff"], sic_result["bkg_eff"]))
+            metrics[f"auc_{suffix}"] = auc
+            if sic_result["max_sic"] > best_sic:
+                best_sic = float(sic_result["max_sic"])
+                best_sic_unc = float(sic_result["max_sic_unc"])
+            self._write_sic_summary_plot(sic_result, stage, label)
+        if metrics:
+            metrics["max_sic"] = best_sic
+            metrics["max_sic_unc"] = best_sic_unc
+        return metrics
+
+    def _compute_multiclass_physics_metrics_from_arrays(
+            self,
+            probs: np.ndarray,
+            labels: np.ndarray,
+            weights: np.ndarray,
+            training: bool,
+            output_base: Optional[Path] = None,
+    ) -> Dict[str, float]:
+        base_indices = self._sic_base_indices()
+        if not base_indices or self.num_classes is None:
+            return {}
+        kwargs = self._physics_metric_kwargs()
+        bins = int(kwargs.get("bins", self.config.physics_bins))
+        min_bkg_events = int(kwargs.get("min_bkg_events", self.config.sic_min_bkg_events))
+        min_bkg_ratio = kwargs.get("min_bkg_ratio")
+        edges = np.linspace(0.0, 1.0, bins + 1)
+        class_names = self.class_labels or [str(i) for i in range(self.num_classes)]
+        stage = "train" if training else "test"
+        base_mask = np.isin(labels, np.asarray(base_indices))
+        metrics: Dict[str, float] = {}
+        best_sic = 0.0
+        best_sic_unc = 0.0
+        for sig_idx in range(self.num_classes):
+            if sig_idx in base_indices:
+                continue
+            mask = base_mask | (labels == sig_idx)
+            if not np.any(mask):
+                continue
+            binary_targets = (labels[mask] == sig_idx).astype(int)
+            if binary_targets.sum() == 0 or (binary_targets == 0).sum() == 0:
+                continue
+            scores = probs[mask, sig_idx]
+            selected_weights = weights[mask]
+            result = calculate_physics_metrics(
+                logits=scores,
+                targets=binary_targets,
+                weights=selected_weights,
+                training=training,
+                log_plots=False,
+                **kwargs,
+            )
+            sic_result = compute_sic_from_scores(
+                binary_targets,
+                scores,
+                selected_weights,
+                edges,
+                min_bkg_events=min_bkg_events,
+                min_bkg_ratio=min_bkg_ratio,
+            )
+            label = class_names[sig_idx] if sig_idx < len(class_names) else str(sig_idx)
+            suffix = self._metric_label(label)
+            metrics[f"auc_{suffix}"] = float(result["auc"])
+            metrics[f"max_sic_{suffix}"] = float(result["max_sic"])
+            metrics[f"max_sic_unc_{suffix}"] = float(result["max_sic_unc"])
+            metrics[f"trafo_bin_sig_{suffix}"] = float(result["trafo_bin_sig"])
+            if result["max_sic"] > best_sic:
+                best_sic = float(result["max_sic"])
+                best_sic_unc = float(result["max_sic_unc"])
+            save_path = (
+                output_base.with_name(f"{output_base.stem}-sic-{suffix}.png")
+                if output_base is not None
+                else None
+            )
+            self._write_sic_summary_plot(sic_result, stage, label, save_path=save_path)
+        if metrics:
+            metrics["max_sic"] = best_sic
+            metrics["max_sic_unc"] = best_sic_unc
+        return metrics
 
     def _compute_epoch_physics_metrics(
             self,
@@ -1242,6 +1606,7 @@ class Trainer:
             "confusion": plot_confusion_matrix(
                 metric_arrays["confusion_matrix"],
                 self.class_labels,
+                entries_matrix=metric_arrays.get("confusion_entries"),
                 normalize=True,
                 title=f"{stage.title()} confusion matrix",
             ),
@@ -1386,7 +1751,7 @@ class Trainer:
                 r = dist.get_rank()
                 logging.info("[Rank %d] Before barrier", r)
                 torch.cuda.synchronize()
-                dist.barrier()
+                self._distributed_barrier()
                 logging.info("[Rank %d] After barrier", r)
 
                 logging.info("rank=%s backend=%s preds_device=%s idx_device=%s",
@@ -1483,7 +1848,13 @@ class Trainer:
         )
         metrics.update(self._classification_scalar_metrics(class_metric_arrays))
         probs = class_metric_arrays["probabilities"]
-        self._log_classification_plots(probs, labels_np, weights_np, class_metric_arrays, "test")
+        self._log_classification_plots(
+            class_metric_arrays,
+            "test",
+            probs=probs,
+            targets=labels_np,
+            weights=weights_np,
+        )
 
         resolved_base = self._resolve_eval_base_path(Path(output_path)) if output_path else None
         if resolved_base is not None:
@@ -1500,6 +1871,16 @@ class Trainer:
                     wandb_run=self.wandb_run,
                     f_name=str(resolved_base.with_name(f"{resolved_base.stem}-sic.png")) if resolved_base else None,
                     **self._physics_metric_kwargs(),
+                )
+            )
+        elif self.config.compute_physics_metrics and preds.numel() > 0 and self.num_classes and self.num_classes > 2:
+            metrics.update(
+                self._compute_multiclass_physics_metrics_from_arrays(
+                    probs,
+                    labels_np,
+                    weights_np,
+                    training=False,
+                    output_base=resolved_base,
                 )
             )
 

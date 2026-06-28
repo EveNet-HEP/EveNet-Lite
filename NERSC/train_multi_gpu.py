@@ -251,6 +251,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional YAML/JSON file with calculate_physics_metrics keyword overrides",
     )
     parser.add_argument(
+        "--class-weight-factors",
+        type=float,
+        nargs="+",
+        help="Per-class scale factors in --class-labels order, applied after existing weights",
+    )
+    parser.add_argument(
+        "--classification-score-bins",
+        type=int,
+        default=100,
+        help="Score histogram bins for multiclass train/validation AUC and plots",
+    )
+    parser.add_argument(
         "--use-wandb",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -424,6 +436,8 @@ def main() -> None:
         eval_batch_size=args.eval_batch_size,
         sic_min_bkg_events=args.sic_min_bkg_events,
         physics_metric_config=physics_metric_config,
+        class_weight_factors=args.class_weight_factors,
+        classification_score_bins=args.classification_score_bins,
         debug=args.debug,
         log_level=log_level,
         **classifier_config
