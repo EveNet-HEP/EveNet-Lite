@@ -1181,19 +1181,50 @@ class Trainer:
         self.wandb_run.log(
             {
                 "train/loss": loss,
-                "metrics/train_accuracy": accuracy,
+                "metric-Accuracy/train_step": accuracy,
                 "epoch": epoch + 1,
                 **self._optimizer_learning_rates(),
             },
             step=step,
         )
 
+    @staticmethod
+    def _wandb_metric_key(prefix: str, name: str) -> str:
+        if name == "loss":
+            return f"{prefix}/loss"
+        groups = [
+            ("weighted_auc", "metric-AUC", "weighted"),
+            ("macro_auc", "metric-AUC", "macro"),
+            ("auc", "metric-AUC", "overall"),
+            ("auc_", "metric-AUC", None),
+            ("weighted_recall", "metric-Recall", "weighted"),
+            ("macro_recall", "metric-Recall", "macro"),
+            ("recall_", "metric-Recall", None),
+            ("weighted_precision", "metric-Precision", "weighted"),
+            ("macro_precision", "metric-Precision", "macro"),
+            ("precision_", "metric-Precision", None),
+            ("weighted_f1", "metric-F1", "weighted"),
+            ("macro_f1", "metric-F1", "macro"),
+            ("f1_", "metric-F1", None),
+            ("support_", "metric-Support", None),
+            ("balanced_accuracy", "metric-Accuracy", "balanced"),
+            ("accuracy", "metric-Accuracy", "overall"),
+            ("max_sic_unc_", "metric-SIC-unc", None),
+            ("max_sic_unc", "metric-SIC-unc", "best"),
+            ("max_sic_", "metric-SIC", None),
+            ("max_sic", "metric-SIC", "best"),
+            ("trafo_bin_sig_", "metric-Trafo", None),
+            ("trafo_bin_sig", "metric-Trafo", "best"),
+        ]
+        for token, group, fixed_suffix in groups:
+            if name == token:
+                return f"{group}/{prefix}_{fixed_suffix}"
+            if token.endswith("_") and name.startswith(token):
+                return f"{group}/{prefix}_{name[len(token):]}"
+        return f"metric-Other/{prefix}_{name}"
+
     def _format_metric_group(self, metrics: Dict[str, float], prefix: str) -> Dict[str, float]:
-        formatted: Dict[str, float] = {}
-        for name, value in metrics.items():
-            key = f"{prefix}/{name}" if name in {"loss", "auc"} else f"metrics/{prefix}_{name}"
-            formatted[key] = value
-        return formatted
+        return {self._wandb_metric_key(prefix, name): value for name, value in metrics.items()}
 
     def _format_wandb_epoch_metrics(
             self, train_metrics: Dict[str, float], val_metrics: Dict[str, float]
