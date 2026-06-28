@@ -99,9 +99,7 @@ class TrainerConfig:
     wandb: Optional[Dict[str, Any]] = None
     compute_physics_metrics: bool = True
     physics_bins: int = 1000
-    sic_min_bkg_events: int = 100
     physics_metric_config: Dict[str, Any] = field(default_factory=dict)
-    class_weight_factors: Optional[List[float]] = None
     classification_score_bins: int = 100
     loss_gamma: float = 0.0
     eval_batch_size: Optional[int] = None
@@ -324,18 +322,6 @@ class Trainer:
         self.val_dataset = EvenetTensorDataset(*val_data) if val_data is not None else None
         self.test_dataset = EvenetTensorDataset(*test_data) if test_data is not None else None
 
-    def _class_weight_factor_tensor(self, device: torch.device) -> Optional[torch.Tensor]:
-        factors = self.config.class_weight_factors
-        if not factors:
-            return None
-        factor_tensor = torch.as_tensor(factors, dtype=torch.float32)
-        num_classes = self.num_classes or factor_tensor.numel()
-        if factor_tensor.numel() != num_classes:
-            raise ValueError(
-                f"class_weight_factors must have {num_classes} values in class_labels order; got {factor_tensor.numel()}"
-            )
-        return factor_tensor.to(device)
-
     def _maybe_wrap_ddp(self) -> torch.nn.Module:
         if isinstance(self.model, DDP):
             return self.model
@@ -493,7 +479,6 @@ class Trainer:
                 self.train_dataset,
                 self.train_dataset.sample_weights,
                 epoch_size,
-                class_weight_factors=self.config.class_weight_factors,
             )
             if sampler_obj is None and self.world_size > 1:
                 sampler_obj = DistributedSampler(self.train_dataset)
@@ -966,8 +951,6 @@ class Trainer:
         if metric_tracker is not None:
             metric_tracker.reset()
 
-        class_factors = self._class_weight_factor_tensor(self.device)
-
         progress = None
         if self.is_rank_zero():
             try:
@@ -997,12 +980,6 @@ class Trainer:
                 weight_tensor = torch.where(finite_mask, weights, torch.zeros_like(weights))
                 if not torch.all(finite_mask):
                     logging.debug("Non-finite weights detected; treating them as zero during loss computation.")
-            if class_factors is not None:
-                if int(targets.max().item()) >= class_factors.numel():
-                    raise ValueError("class_weight_factors must match the class index range")
-                base_weight = weight_tensor if weight_tensor is not None else torch.ones_like(targets, dtype=torch.float32)
-                weight_tensor = base_weight * class_factors[targets]
-
             with torch.set_grad_enabled(training):
                 outputs = self._forward(model, features)
                 if not torch.isfinite(outputs).all():
@@ -1243,7 +1220,7 @@ class Trainer:
     def _physics_metric_kwargs(self) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
             "bins": self.config.physics_bins,
-            "min_bkg_events": self.config.sic_min_bkg_events,
+            "min_bkg_events": 100,
         }
         for key, value in (self.config.physics_metric_config or {}).items():
             if key not in {"SIC_base", "sic_base"}:
@@ -1447,7 +1424,7 @@ class Trainer:
         if not base_indices or self.num_classes is None:
             return {}
         kwargs = self._physics_metric_kwargs()
-        min_bkg_events = int(kwargs.get("min_bkg_events", self.config.sic_min_bkg_events))
+        min_bkg_events = int(kwargs["min_bkg_events"])
         min_bkg_ratio = kwargs.get("min_bkg_ratio")
         class_names = self.class_labels or [str(i) for i in range(self.num_classes)]
         stage = "train" if training else "valid"
@@ -1499,7 +1476,7 @@ class Trainer:
             return {}
         kwargs = self._physics_metric_kwargs()
         bins = int(kwargs.get("bins", self.config.physics_bins))
-        min_bkg_events = int(kwargs.get("min_bkg_events", self.config.sic_min_bkg_events))
+        min_bkg_events = int(kwargs["min_bkg_events"])
         min_bkg_ratio = kwargs.get("min_bkg_ratio")
         edges = np.linspace(0.0, 1.0, bins + 1)
         class_names = self.class_labels or [str(i) for i in range(self.num_classes)]

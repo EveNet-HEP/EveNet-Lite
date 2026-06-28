@@ -244,17 +244,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for scheduler")
     parser.add_argument("--global-input-dim", type=int, default=10, help="Number of global features")
     parser.add_argument("--sequential-input-dim", type=int, default=7, help="Number of sequential features per object")
-    parser.add_argument("--sic-min-bkg-events", type=int, default=10, help="Minimum background events for SIC")
     parser.add_argument(
         "--physics-metric-config",
         type=Path,
         help="Optional YAML/JSON file with calculate_physics_metrics keyword overrides",
-    )
-    parser.add_argument(
-        "--class-weight-factors",
-        type=float,
-        nargs="+",
-        help="Per-class scale factors in --class-labels order, applied after existing weights",
     )
     parser.add_argument(
         "--classification-score-bins",
@@ -434,9 +427,7 @@ def main() -> None:
         eval_weights=eval_weights,
         eval_output_path=str(args.eval_output) if args.eval_output else None,
         eval_batch_size=args.eval_batch_size,
-        sic_min_bkg_events=args.sic_min_bkg_events,
         physics_metric_config=physics_metric_config,
-        class_weight_factors=args.class_weight_factors,
         classification_score_bins=args.classification_score_bins,
         debug=args.debug,
         log_level=log_level,
