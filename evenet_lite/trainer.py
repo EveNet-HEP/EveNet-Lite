@@ -14,7 +14,14 @@ from torch.utils.data import DataLoader, DistributedSampler
 from .callbacks import Callback, NormalizationCallback, DebugCallback
 from .data import EvenetTensorDataset, build_sampler, DistributedWeightedSampler
 from .checkpoint import load_checkpoint, save_checkpoint
-from .metrics import calculate_physics_metrics, compute_accuracy, compute_loss, summarize_metrics
+from .metrics import (
+    calculate_physics_metrics,
+    classification_probabilities,
+    compute_accuracy,
+    compute_classification_metrics,
+    compute_loss,
+    summarize_metrics,
+)
 from .optim import (
     build_optimizers_and_schedulers,
     DEFAULT_LR_GROUPS,
@@ -90,6 +97,7 @@ class TrainerConfig:
     compute_physics_metrics: bool = True
     physics_bins: int = 1000
     sic_min_bkg_events: int = 100
+    physics_metric_config: Dict[str, Any] = field(default_factory=dict)
     loss_gamma: float = 0.0
     eval_batch_size: Optional[int] = None
     eval_output_path: Optional[str] = None
@@ -132,8 +140,6 @@ class Trainer:
         self._init_metrics()
         self.wandb_run = None
         self._maybe_init_wandb()
-        self._warned_non_binary_physics = False
-
         self.train_dataset: EvenetTensorDataset
         self.val_dataset: Optional[EvenetTensorDataset] = None
         self.test_dataset: Optional[EvenetTensorDataset] = None
@@ -979,15 +985,14 @@ class Trainer:
             reduced_loss = self._reduce_mean_scalar(loss.item())
             reduced_accuracy = self._reduce_mean_scalar(batch_accuracy)
 
-            if self.config.compute_physics_metrics:
-                epoch_probs.append(logits_for_metrics.detach())
-                epoch_targets.append(targets.detach())
-                metric_weights = (
-                    weight_tensor.detach()
-                    if weight_tensor is not None
-                    else torch.ones_like(targets, dtype=torch.float32, device=self.device)
-                )
-                epoch_weights.append(metric_weights)
+            epoch_probs.append(logits_for_metrics.detach())
+            epoch_targets.append(targets.detach())
+            metric_weights = (
+                weight_tensor.detach()
+                if weight_tensor is not None
+                else torch.ones_like(targets, dtype=torch.float32, device=self.device)
+            )
+            epoch_weights.append(metric_weights)
 
             batch_metrics = {"loss": loss.item(), "accuracy": batch_accuracy}
             for cb in self.callbacks:
@@ -1016,7 +1021,12 @@ class Trainer:
         if metric_tracker is not None:
             metrics["accuracy"] = float(metric_tracker.compute().item())
 
-        if self.config.compute_physics_metrics and epoch_probs:
+        if epoch_probs:
+            metrics.update(
+                self._compute_epoch_classification_metrics(epoch_probs, epoch_targets, epoch_weights, training=training)
+            )
+
+        if self.config.compute_physics_metrics and epoch_probs and self.num_classes == 2:
             metrics.update(
                 self._compute_epoch_physics_metrics(epoch_probs, epoch_targets, epoch_weights, training=training)
             )
@@ -1066,6 +1076,123 @@ class Trainer:
                 lr_logs[key] = float(lr)
         return lr_logs
 
+    def _physics_metric_kwargs(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "bins": self.config.physics_bins,
+            "min_bkg_events": self.config.sic_min_bkg_events,
+        }
+        kwargs.update(self.config.physics_metric_config or {})
+        return kwargs
+
+    def _metric_label(self, label: str) -> str:
+        return "".join(ch if ch.isalnum() else "_" for ch in label).strip("_") or "class"
+
+    def _classification_scalar_metrics(self, metrics: Dict[str, Any]) -> Dict[str, float]:
+        scalar_keys = [
+            "accuracy",
+            "balanced_accuracy",
+            "macro_precision",
+            "macro_recall",
+            "macro_f1",
+            "weighted_precision",
+            "weighted_recall",
+            "weighted_f1",
+            "macro_auc",
+            "weighted_auc",
+        ]
+        scalars = {key: float(metrics[key]) for key in scalar_keys if key in metrics}
+        class_names = self.class_labels or [str(i) for i in range(len(metrics.get("class_support", [])))]
+        for idx, label in enumerate(class_names):
+            suffix = self._metric_label(label)
+            for metric_key, prefix in [
+                ("class_precision", "precision"),
+                ("class_recall", "recall"),
+                ("class_f1", "f1"),
+                ("class_support", "support"),
+                ("class_auc", "auc"),
+            ]:
+                values = metrics.get(metric_key)
+                if values is None or idx >= len(values) or not np.isfinite(values[idx]):
+                    continue
+                scalars[f"{prefix}_{suffix}"] = float(values[idx])
+        return scalars
+
+    def _log_classification_plots(
+            self,
+            probs: np.ndarray,
+            targets: np.ndarray,
+            weights: np.ndarray,
+            metric_arrays: Dict[str, Any],
+            stage: str,
+    ) -> None:
+        if self.wandb_run is None or not self.is_rank_zero():
+            return
+        try:
+            import wandb
+            import matplotlib.pyplot as plt
+            from .plots import plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
+        except Exception as exc:  # pragma: no cover - optional plotting dependency
+            logging.warning("Skipping classification plots: %s", exc)
+            return
+
+        figures = {
+            f"Classification/{stage}-confusion": plot_confusion_matrix(
+                metric_arrays["confusion_matrix"],
+                self.class_labels,
+                normalize=True,
+                title=f"{stage.title()} confusion matrix",
+            ),
+            f"Classification/{stage}-background-rejection": plot_rejection_curves(
+                probs,
+                targets,
+                weights,
+                self.class_labels,
+                title=f"{stage.title()} one-vs-rest background rejection",
+            ),
+            f"Classification/{stage}-score-distributions": plot_score_distributions(
+                probs,
+                targets,
+                weights,
+                self.class_labels,
+                title=f"{stage.title()} score distributions by true class",
+            ),
+        }
+        try:
+            self.wandb_run.log(
+                {name: wandb.Image(fig) for name, fig in figures.items()},
+                step=self.global_step,
+            )
+        finally:
+            for fig in figures.values():
+                plt.close(fig)
+
+    def _compute_epoch_classification_metrics(
+            self,
+            logits_list: List[torch.Tensor],
+            targets_list: List[torch.Tensor],
+            weights_list: List[torch.Tensor],
+            training: bool,
+    ) -> Dict[str, float]:
+        logits = self._all_gather_tensor(torch.cat(logits_list).detach())
+        targets = self._all_gather_tensor(torch.cat(targets_list).detach())
+        weights = self._all_gather_tensor(torch.cat(weights_list).detach())
+
+        if not self.is_rank_zero():
+            return {}
+
+        logits_np = logits.cpu().numpy()
+        targets_np = targets.cpu().numpy()
+        weights_np = weights.cpu().numpy()
+        metric_arrays = compute_classification_metrics(
+            logits=logits_np,
+            targets=targets_np,
+            weights=weights_np,
+            class_labels=self.class_labels,
+        )
+        probs = classification_probabilities(logits_np)
+        self._log_classification_plots(probs, targets_np, weights_np, metric_arrays, "train" if training else "valid")
+        return self._classification_scalar_metrics(metric_arrays)
+
     def _compute_epoch_physics_metrics(
             self,
             probs_list: List[torch.Tensor],
@@ -1073,13 +1200,6 @@ class Trainer:
             weights_list: List[torch.Tensor],
             training: bool,
     ) -> dict[Any, Any] | dict[str, ndarray]:
-        if self.num_classes and self.num_classes != 2 and not self._warned_non_binary_physics:
-            logging.warning(
-                "Default physics metrics assume binary classification with signal label = 1. "
-                "For multiclass tasks, please supply a custom Callback (override on_epoch_end) to compute metrics instead."
-            )
-            self._warned_non_binary_physics = True
-
         probs = self._all_gather_tensor(torch.cat(probs_list).detach())
         targets = self._all_gather_tensor(torch.cat(targets_list).detach())
         weights = self._all_gather_tensor(torch.cat(weights_list).detach())
@@ -1092,11 +1212,10 @@ class Trainer:
             targets=targets.cpu().numpy(),
             weights=weights.cpu().numpy(),
             training=training,
-            bins=self.config.physics_bins,
-            min_bkg_events=self.config.sic_min_bkg_events,
             log_plots=self.wandb_run is not None,
             wandb_run=self.wandb_run,
             log_step=self.global_step,
+            **self._physics_metric_kwargs(),
         )
         return {
             "auc": metrics["auc"],
@@ -1105,15 +1224,67 @@ class Trainer:
             "trafo_bin_sig": metrics["trafo_bin_sig"],
         }
 
+    def _save_classification_plots(
+            self,
+            base_path: Path,
+            probs: np.ndarray,
+            targets: np.ndarray,
+            weights: np.ndarray,
+            metric_arrays: Dict[str, Any],
+            stage: str,
+    ) -> None:
+        try:
+            import matplotlib.pyplot as plt
+            from .plots import plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
+        except Exception as exc:  # pragma: no cover - optional plotting dependency
+            logging.warning("Skipping saved classification plots: %s", exc)
+            return
+
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        figures = {
+            "confusion": plot_confusion_matrix(
+                metric_arrays["confusion_matrix"],
+                self.class_labels,
+                normalize=True,
+                title=f"{stage.title()} confusion matrix",
+            ),
+            "background-rejection": plot_rejection_curves(
+                probs,
+                targets,
+                weights,
+                self.class_labels,
+                title=f"{stage.title()} one-vs-rest background rejection",
+            ),
+            "score-distributions": plot_score_distributions(
+                probs,
+                targets,
+                weights,
+                self.class_labels,
+                title=f"{stage.title()} score distributions by true class",
+            ),
+        }
+        try:
+            for name, fig in figures.items():
+                fig.savefig(base_path.with_name(f"{base_path.stem}-{name}.png"), dpi=300, bbox_inches="tight")
+        finally:
+            for fig in figures.values():
+                plt.close(fig)
+
     def _log_epoch_stdout(self, epoch: int, total_epochs: int, metrics: Dict[str, float]) -> None:
         msg_parts = [f"Epoch {epoch + 1}/{total_epochs}"]
         for key in [
             "train_loss",
             "train_accuracy",
+            "train_balanced_accuracy",
+            "train_macro_f1",
+            "train_weighted_auc",
             "train_auc",
             "train_max_sic",
             "val_loss",
             "val_accuracy",
+            "val_balanced_accuracy",
+            "val_macro_f1",
+            "val_weighted_auc",
             "val_auc",
             "val_max_sic",
 
@@ -1299,31 +1470,47 @@ class Trainer:
 
         loss = compute_loss(preds, labels, valid_weight_tensor, gamma=self.config.loss_gamma)
         accuracy = compute_accuracy(preds, labels)
-        metrics: Dict[str, float] = {"loss": float(loss.item()), "accuracy": float(accuracy)}
+        metrics: Dict[str, Any] = {"loss": float(loss.item()), "accuracy": float(accuracy)}
+        weights_np = (
+            weights.numpy()
+            if weights is not None
+            else torch.ones_like(labels, dtype=torch.float32).numpy()
+        )
+        preds_np = preds.numpy()
+        labels_np = labels.numpy()
+        class_metric_arrays = compute_classification_metrics(
+            logits=preds_np,
+            targets=labels_np,
+            weights=weights_np,
+            class_labels=self.class_labels,
+        )
+        metrics.update(self._classification_scalar_metrics(class_metric_arrays))
+        probs = classification_probabilities(preds_np)
+        self._log_classification_plots(probs, labels_np, weights_np, class_metric_arrays, "test")
 
-        if self.config.compute_physics_metrics and preds.numel() > 0:
+        resolved_base = self._resolve_eval_base_path(Path(output_path)) if output_path else None
+        if resolved_base is not None:
+            self._save_classification_plots(resolved_base, probs, labels_np, weights_np, class_metric_arrays, "test")
+
+        if self.config.compute_physics_metrics and preds.numel() > 0 and self.num_classes == 2:
             metrics.update(
                 calculate_physics_metrics(
-                    logits=preds.numpy(),
-                    targets=labels.numpy(),
-                    weights=(
-                        weights.numpy()
-                        if weights is not None
-                        else torch.ones_like(labels, dtype=torch.float32).numpy()
-                    ),
+                    logits=preds_np,
+                    targets=labels_np,
+                    weights=weights_np,
                     training=False,
-                    bins=self.config.physics_bins,
-                    min_bkg_events=self.config.sic_min_bkg_events,
                     log_plots=self.wandb_run is not None,
                     wandb_run=self.wandb_run,
-                    f_name=f"{output_path}/eval.png" if output_path else None,
+                    f_name=str(resolved_base.with_name(f"{resolved_base.stem}-sic.png")) if resolved_base else None,
+                    **self._physics_metric_kwargs(),
                 )
             )
 
         saved_description = None
-        if output_path:
-            resolved_base = self._resolve_eval_base_path(Path(output_path))
-            saved_description = f"{resolved_base.parent} ({resolved_base.stem}-sig/-bkg{resolved_base.suffix})"
+        if resolved_base is not None:
+            class_names = self.class_labels or [str(i) for i in range(self.num_classes or 0)]
+            suffixes = "/".join(f"{resolved_base.stem}-{self._metric_label(name)}{resolved_base.suffix}" for name in class_names)
+            saved_description = f"{resolved_base.parent} ({suffixes})"
 
             self._export_evaluation(
                 base_path=resolved_base,
@@ -1335,14 +1522,16 @@ class Trainer:
             )
 
         total_entries = int(labels.shape[0])
-        sig_entries = int((labels == 1).sum().item()) if labels.numel() > 0 else 0
-        bkg_entries = total_entries - sig_entries
+        class_names = self.class_labels or [str(i) for i in range(self.num_classes or 0)]
+        class_counts = ", ".join(
+            f"{name}={int((labels == idx).sum().item())}"
+            for idx, name in enumerate(class_names)
+        )
 
         logging.info(
-            "Evaluation completed on %d entries (signal=%d, background=%d). Metrics saved%s",
+            "Evaluation completed on %d entries (%s). Metrics saved%s",
             total_entries,
-            sig_entries,
-            bkg_entries,
+            class_counts,
             f" to {saved_description}" if saved_description else " in-memory",
         )
 
@@ -1357,7 +1546,7 @@ class Trainer:
         """Resolve eval output path to a base NPZ path.
 
         If ``provided`` includes a numpy suffix, use it directly. Otherwise, treat it as a
-        directory and drop files named ``eval_output-sig.npz``/``eval_output-bkg.npz`` inside.
+        directory and drop files named ``eval_output-<class>.npz`` inside.
         """
 
         if provided.suffix.lower() in {".npz", ".npy"}:
@@ -1372,7 +1561,7 @@ class Trainer:
             labels: torch.Tensor,
             weights: Optional[torch.Tensor],
             raw_features: Dict[str, torch.Tensor],
-            metrics: Dict[str, float],
+            metrics: Dict[str, Any],
     ) -> None:
         base_path = self._ensure_np_suffix(base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1391,10 +1580,10 @@ class Trainer:
 
         metric_arrays = {f"metric_{k}": np.array(v, dtype=np.float32) for k, v in metrics.items()}
 
-        sig_mask = labels_np == 1
-        bkg_mask = labels_np == 0
-        suffixes = [("sig", sig_mask), ("bkg", bkg_mask)]
-        for name, mask in suffixes:
+        num_classes = self.num_classes or (int(labels_np.max() + 1) if labels_np.size else 0)
+        class_names = self.class_labels or [str(i) for i in range(num_classes)]
+        for idx, class_name in enumerate(class_names):
+            mask = labels_np == idx
             if mask.any():
                 class_payload: Dict[str, np.ndarray] = {
                     **{k: v[mask] for k, v in features_np.items()},
@@ -1405,5 +1594,5 @@ class Trainer:
                 }
                 class_payload.update(metric_arrays)
 
-                class_path = base_path.with_name(f"{base_path.stem}-{name}{base_path.suffix}")
+                class_path = base_path.with_name(f"{base_path.stem}-{self._metric_label(class_name)}{base_path.suffix}")
                 np.savez(class_path, **class_payload)

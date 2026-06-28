@@ -195,6 +195,7 @@ class EvenetLiteClassifier:
             eval_output_path: Optional[str] = None,
             eval_batch_size: Optional[int] = None,
             sic_min_bkg_events: int = 100,
+            physics_metric_config: Optional[Dict[str, Any]] = None,
             debug: bool = False,
     ) -> None:
         if feature_names is None:
@@ -239,6 +240,7 @@ class EvenetLiteClassifier:
         self.config.eval_output_path = eval_output_path
         self.config.eval_batch_size = eval_batch_size
         self.config.sic_min_bkg_events = sic_min_bkg_events
+        self.config.physics_metric_config = dict(physics_metric_config or {})
 
         def _attach_params(
             data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]],
