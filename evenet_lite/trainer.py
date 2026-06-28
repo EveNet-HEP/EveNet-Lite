@@ -16,7 +16,6 @@ from .data import EvenetTensorDataset, build_sampler, DistributedWeightedSampler
 from .checkpoint import load_checkpoint, save_checkpoint
 from .metrics import (
     calculate_physics_metrics,
-    classification_probabilities,
     compute_accuracy,
     compute_classification_metrics,
     compute_loss,
@@ -1129,8 +1128,7 @@ class Trainer:
             return
         try:
             import wandb
-            import matplotlib.pyplot as plt
-            from .plots import plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
+            from .plots import close_figure, plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
         except Exception as exc:  # pragma: no cover - optional plotting dependency
             logging.warning("Skipping classification plots: %s", exc)
             return
@@ -1164,7 +1162,7 @@ class Trainer:
             )
         finally:
             for fig in figures.values():
-                plt.close(fig)
+                close_figure(fig)
 
     def _compute_epoch_classification_metrics(
             self,
@@ -1189,7 +1187,7 @@ class Trainer:
             weights=weights_np,
             class_labels=self.class_labels,
         )
-        probs = classification_probabilities(logits_np)
+        probs = metric_arrays["probabilities"]
         self._log_classification_plots(probs, targets_np, weights_np, metric_arrays, "train" if training else "valid")
         return self._classification_scalar_metrics(metric_arrays)
 
@@ -1234,8 +1232,7 @@ class Trainer:
             stage: str,
     ) -> None:
         try:
-            import matplotlib.pyplot as plt
-            from .plots import plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
+            from .plots import close_figure, plot_confusion_matrix, plot_rejection_curves, plot_score_distributions
         except Exception as exc:  # pragma: no cover - optional plotting dependency
             logging.warning("Skipping saved classification plots: %s", exc)
             return
@@ -1268,7 +1265,7 @@ class Trainer:
                 fig.savefig(base_path.with_name(f"{base_path.stem}-{name}.png"), dpi=300, bbox_inches="tight")
         finally:
             for fig in figures.values():
-                plt.close(fig)
+                close_figure(fig)
 
     def _log_epoch_stdout(self, epoch: int, total_epochs: int, metrics: Dict[str, float]) -> None:
         msg_parts = [f"Epoch {epoch + 1}/{total_epochs}"]
@@ -1485,7 +1482,7 @@ class Trainer:
             class_labels=self.class_labels,
         )
         metrics.update(self._classification_scalar_metrics(class_metric_arrays))
-        probs = classification_probabilities(preds_np)
+        probs = class_metric_arrays["probabilities"]
         self._log_classification_plots(probs, labels_np, weights_np, class_metric_arrays, "test")
 
         resolved_base = self._resolve_eval_base_path(Path(output_path)) if output_path else None

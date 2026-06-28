@@ -37,14 +37,6 @@ def _mean_ensemble_logits(logits: torch.Tensor) -> torch.Tensor:
     return logits.mean(dim=0) if logits.dim() == 3 else logits
 
 
-# def compute_loss(logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]) -> torch.Tensor:
-#     logits, targets, weights = _flatten_ensemble(logits, targets, weights)
-#     per_sample = F.cross_entropy(logits, targets, reduction="none")
-#     if weights is not None:
-#         weights = weights.to(per_sample.device)
-#         return sum(per_sample * weights) / sum(weights)
-#     return per_sample.mean()
-
 def compute_loss(
         logits: torch.Tensor,
         targets: torch.Tensor,
@@ -139,16 +131,17 @@ def compute_classification_metrics(
     present = support > 0
 
     class_auc = np.full(num_classes, np.nan, dtype=float)
-    for cls in range(num_classes):
-        if not targets.size:
-            continue
-        y_true = (targets == cls).astype(int)
-        if weights[y_true == 1].sum() <= 0 or weights[y_true == 0].sum() <= 0:
-            continue
-        try:
-            class_auc[cls], _, _, _ = weighted_roc_curve(y_true, probs[:, cls], weights)
-        except ValueError:
-            continue
+    if targets.size:
+        for cls in range(num_classes):
+            if cls >= probs.shape[1]:
+                continue
+            y_true = (targets == cls).astype(int)
+            if weights[y_true == 1].sum() <= 0 or weights[y_true == 0].sum() <= 0:
+                continue
+            try:
+                class_auc[cls], _, _, _ = weighted_roc_curve(y_true, probs[:, cls], weights)
+            except ValueError:
+                continue
 
     finite_auc = np.isfinite(class_auc)
     row_sums = support[:, None]
@@ -178,6 +171,7 @@ def compute_classification_metrics(
         "class_auc": class_auc,
         "confusion_matrix": matrix,
         "confusion_matrix_normalized": normalized_matrix,
+        "probabilities": probs,
     }
 
 
@@ -216,8 +210,6 @@ def weighted_roc_curve(
     cum_w_bkg = np.concatenate(([0.0], cum_w_bkg))
     cum_w2_bkg = np.concatenate(([0.0], cum_w2_bkg))
 
-    # Compute effective n_bkg and σ_fpr vectorized
-    n_eff = (cum_w_bkg ** 2) / (cum_w2_bkg + safe_eps)
     fpr_clipped = np.clip(fpr_raw, 0.0, 1.0)
 
     # Poisson-style uncertainty: σ = sqrt(sum w^2) / total_bkg
