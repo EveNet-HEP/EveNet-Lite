@@ -19,6 +19,7 @@ def configure_style() -> None:
             "font.family": "sans-serif",
             "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
             "mathtext.fontset": "dejavusans",
+            "axes.unicode_minus": False,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
             "axes.linewidth": 0.9,
@@ -255,6 +256,7 @@ def plot_score_distributions(
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Predicted probability")
         ax.set_ylabel("Density")
+        ax.set_yscale("log")
         _clean_spines(ax)
     handles, labels = axes.flat[0].get_legend_handles_labels()
     if handles:
@@ -306,6 +308,7 @@ def plot_score_distributions_from_histograms(
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Predicted probability")
         ax.set_ylabel("Density")
+        ax.set_yscale("log")
         _clean_spines(ax)
     handles, labels = axes.flat[0].get_legend_handles_labels()
     if handles:
