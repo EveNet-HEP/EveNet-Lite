@@ -197,15 +197,16 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `eval_data`                                                         | `None`                         | Optional test tuple evaluated after training.                            |
 | `eval_output_path`                                                  | `None`                         | Path to save evaluation outputs when provided.                           |
 | `eval_batch_size`                                                   | `None`                         | Batch size for evaluation (falls back to training batch size).           |
-| `sic_min_bkg_events`                                                | `100`                          | Minimum background events for SIC metric calculation.                    |
+| `physics_metric_config`                                             | `None`                         | Optional `calculate_physics_metrics` keyword overrides; `SIC_base` enables multiclass signal-vs-background SIC. |
+| `classification_score_bins`                                         | `100`                          | Score histogram bins for train/validation multiclass AUC and plots.      |
 | `debug`                                                             | `False`                        | Enables verbose `DebugCallback` logging and diagnostics.                 |
 
 ### `EvenetLiteClassifier.predict` / `evaluate`
 
 - `predict(features, batch_size=256)`: returns class probabilities using the stored normalizer; requires that `fit` or
   `load_checkpoint` has been called.
-- `evaluate(features, labels, weights=None, batch_size=256)`: computes loss/accuracy (and physics metrics when
-  available) on the provided dataset.
+- `evaluate(features, labels, weights=None, batch_size=256)`: computes weighted classification metrics, with binary
+  physics metrics added only for two-class tasks.
 
 ### `run_evenet_lite_training`
 
@@ -228,7 +229,8 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `eval_features` / `eval_labels` / `eval_weights`                    | `None`                               | Optional evaluation payload run after training.                    |
 | `eval_output_path`                                                  | `None`                               | File path to persist evaluation results.                           |
 | `eval_batch_size`                                                   | `None`                               | Batch size for evaluation (defaults to training batch size).       |
-| `sic_min_bkg_events`                                                | `100`                                | Minimum background events for SIC metric computation.              |
+| `physics_metric_config`                                             | `None`                               | Optional `calculate_physics_metrics` keyword overrides; `SIC_base` enables multiclass signal-vs-background SIC. |
+| `classification_score_bins`                                         | `100`                                | Score histogram bins for train/validation multiclass AUC and plots. |
 | `debug`                                                             | `False`                              | Enables verbose debugging callback and sampler diagnostics.        |
 | `loss_gamma`                                                        | `0.0`                                | Focal-loss gamma (``0`` reduces to standard cross-entropy).        |
 | `log_level`                                                         | `logging.INFO`                       | Logging level set before runner diagnostics.                       |

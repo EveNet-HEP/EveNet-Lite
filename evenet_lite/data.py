@@ -131,9 +131,9 @@ def build_sampler(
         epoch_size: Optional[int] = None,
 ) -> Optional[Sampler[int]]:
     if sampler == "weighted":
+        labels = dataset.labels.long()
         if weights is None:
             # derive weights from labels
-            labels = dataset.labels
             class_counts = torch.bincount(labels.long())
             class_weights = class_counts.float().reciprocal().clamp_max(class_counts.numel())
             sample_weights = class_weights[labels.long()]

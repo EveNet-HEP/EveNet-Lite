@@ -57,7 +57,8 @@ def run_evenet_lite_training(
     eval_weights: Optional[torch.Tensor] = None,
     eval_output_path: Optional[str] = None,
     eval_batch_size: Optional[int] = None,
-    sic_min_bkg_events: int = 100,
+    physics_metric_config: Optional[Dict[str, Any]] = None,
+    classification_score_bins: int = 100,
     debug: bool = False,
     log_level: int = logging.INFO,
     loss_gamma: float = 0.0,
@@ -152,7 +153,8 @@ def run_evenet_lite_training(
         early_stop_patience=early_stop_patience,
         eval_output_path=eval_output_path,
         eval_batch_size=eval_batch_size,
-        sic_min_bkg_events=sic_min_bkg_events,
+        physics_metric_config=physics_metric_config,
+        classification_score_bins=classification_score_bins,
         debug=debug,
     )
     return classifier

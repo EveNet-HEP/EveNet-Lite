@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -37,14 +37,6 @@ def _mean_ensemble_logits(logits: torch.Tensor) -> torch.Tensor:
     return logits.mean(dim=0) if logits.dim() == 3 else logits
 
 
-# def compute_loss(logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]) -> torch.Tensor:
-#     logits, targets, weights = _flatten_ensemble(logits, targets, weights)
-#     per_sample = F.cross_entropy(logits, targets, reduction="none")
-#     if weights is not None:
-#         weights = weights.to(per_sample.device)
-#         return sum(per_sample * weights) / sum(weights)
-#     return per_sample.mean()
-
 def compute_loss(
         logits: torch.Tensor,
         targets: torch.Tensor,
@@ -77,6 +69,149 @@ def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     correct = (preds == targets).sum().item()
     return correct / max(1, targets.numel())
+
+
+def classification_probabilities(logits: np.ndarray) -> np.ndarray:
+    """Return class probabilities from logits, averaging ensembles first."""
+    logits = np.asarray(logits)
+    if logits.ndim == 3:
+        logits = logits.mean(axis=0)
+    if logits.ndim == 1:
+        sig = expit(logits)
+        return np.stack([1.0 - sig, sig], axis=1)
+    if logits.shape[1] == 1:
+        sig = expit(logits[:, 0])
+        return np.stack([1.0 - sig, sig], axis=1)
+    return softmax(logits, axis=1)
+
+
+def _weights_or_ones(targets: np.ndarray, weights: Optional[np.ndarray]) -> np.ndarray:
+    if weights is None:
+        return np.ones(targets.shape[0], dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    return np.where(np.isfinite(weights), weights, 0.0)
+
+
+def _safe_divide(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(num, dtype=float)
+    np.divide(num, den, out=out, where=den > 0)
+    return out
+
+
+def classification_metrics_from_confusion_matrix(
+        matrix: np.ndarray,
+        entries_matrix: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray | float]:
+    """Compute weighted classification summaries from a confusion matrix."""
+    matrix = np.asarray(matrix, dtype=float)
+    entries = np.asarray(entries_matrix, dtype=float) if entries_matrix is not None else None
+    support = matrix.sum(axis=1)
+    predicted = matrix.sum(axis=0)
+    true_positive = np.diag(matrix)
+    precision = _safe_divide(true_positive, predicted)
+    recall = _safe_divide(true_positive, support)
+    f1 = _safe_divide(2.0 * precision * recall, precision + recall)
+    total = float(support.sum())
+    present = support > 0
+    row_sums = support[:, None]
+    normalized_matrix = np.divide(
+        matrix,
+        row_sums,
+        out=np.zeros_like(matrix, dtype=float),
+        where=row_sums > 0,
+    )
+
+    return {
+        "accuracy": float(true_positive.sum() / total) if total > 0 else 0.0,
+        "balanced_accuracy": float(np.mean(recall[present])) if np.any(present) else 0.0,
+        "macro_precision": float(np.mean(precision[present])) if np.any(present) else 0.0,
+        "macro_recall": float(np.mean(recall[present])) if np.any(present) else 0.0,
+        "macro_f1": float(np.mean(f1[present])) if np.any(present) else 0.0,
+        "weighted_precision": float(np.sum(precision * support) / total) if total > 0 else 0.0,
+        "weighted_recall": float(np.sum(recall * support) / total) if total > 0 else 0.0,
+        "weighted_f1": float(np.sum(f1 * support) / total) if total > 0 else 0.0,
+        "class_precision": precision,
+        "class_recall": recall,
+        "class_f1": f1,
+        "class_support": support,
+        "confusion_matrix": matrix,
+        "confusion_matrix_normalized": normalized_matrix,
+        **({"confusion_entries": entries} if entries is not None else {}),
+    }
+
+
+def classification_auc_from_score_histograms(score_histograms: np.ndarray) -> np.ndarray:
+    """Compute one-vs-rest AUC from weighted score histograms.
+
+    ``score_histograms[true_class, score_class, bin]`` stores the total weight
+    for all entries in that score bin.
+    """
+    score_histograms = np.asarray(score_histograms, dtype=float)
+    num_classes = score_histograms.shape[0]
+    class_auc = np.full(num_classes, np.nan, dtype=float)
+    for cls in range(num_classes):
+        sig_hist = score_histograms[cls, cls]
+        bkg_hist = score_histograms[:, cls].sum(axis=0) - sig_hist
+        total_sig = sig_hist.sum()
+        total_bkg = bkg_hist.sum()
+        if total_sig <= 0 or total_bkg <= 0:
+            continue
+        sig_eff = np.concatenate(([0.0], np.cumsum(sig_hist[::-1]) / total_sig))
+        bkg_eff = np.concatenate(([0.0], np.cumsum(bkg_hist[::-1]) / total_bkg))
+        class_auc[cls] = float(np.trapz(sig_eff, bkg_eff))
+    return class_auc
+
+
+def compute_classification_metrics(
+        logits: np.ndarray,
+        targets: np.ndarray,
+        weights: Optional[np.ndarray] = None,
+        class_labels: Optional[Sequence[str]] = None,
+) -> Dict[str, np.ndarray | float]:
+    """Compute weighted multiclass classification metrics."""
+    probs = classification_probabilities(logits)
+    targets = np.asarray(targets, dtype=int)
+    num_classes = len(class_labels) if class_labels is not None else probs.shape[1]
+    num_classes = max(num_classes, probs.shape[1], int(targets.max() + 1) if targets.size else 0)
+    weights = _weights_or_ones(targets, weights)
+
+    valid = (targets >= 0) & (targets < num_classes) & (weights >= 0)
+    targets = targets[valid]
+    probs = probs[valid]
+    weights = weights[valid]
+
+    matrix = np.zeros((num_classes, num_classes), dtype=float)
+    entries_matrix = np.zeros((num_classes, num_classes), dtype=float)
+    if targets.size:
+        preds = np.argmax(probs, axis=1)
+        np.add.at(matrix, (targets, preds), weights)
+        np.add.at(entries_matrix, (targets, preds), 1.0)
+
+    summary = classification_metrics_from_confusion_matrix(matrix, entries_matrix)
+    support = summary["class_support"]
+
+    class_auc = np.full(num_classes, np.nan, dtype=float)
+    if targets.size:
+        for cls in range(num_classes):
+            if cls >= probs.shape[1]:
+                continue
+            y_true = (targets == cls).astype(int)
+            if weights[y_true == 1].sum() <= 0 or weights[y_true == 0].sum() <= 0:
+                continue
+            try:
+                class_auc[cls], _, _, _ = weighted_roc_curve(y_true, probs[:, cls], weights)
+            except ValueError:
+                continue
+
+    finite_auc = np.isfinite(class_auc)
+    summary.update({
+        "macro_auc": float(np.mean(class_auc[finite_auc])) if np.any(finite_auc) else 0.5,
+        "weighted_auc": float(np.sum(class_auc[finite_auc] * support[finite_auc]) / support[finite_auc].sum())
+        if np.any(finite_auc) and support[finite_auc].sum() > 0 else 0.5,
+        "class_auc": class_auc,
+        "probabilities": probs,
+    })
+    return summary
 
 
 def weighted_roc_curve(
@@ -114,8 +249,6 @@ def weighted_roc_curve(
     cum_w_bkg = np.concatenate(([0.0], cum_w_bkg))
     cum_w2_bkg = np.concatenate(([0.0], cum_w2_bkg))
 
-    # Compute effective n_bkg and σ_fpr vectorized
-    n_eff = (cum_w_bkg ** 2) / (cum_w2_bkg + safe_eps)
     fpr_clipped = np.clip(fpr_raw, 0.0, 1.0)
 
     # Poisson-style uncertainty: σ = sqrt(sum w^2) / total_bkg
@@ -284,6 +417,90 @@ def compute_sic_from_scores(
     }
 
 
+def compute_sic_from_score_histograms(
+        sig_hist: np.ndarray,
+        bkg_hist: np.ndarray,
+        bkg_w2_hist: Optional[np.ndarray] = None,
+        min_bkg_events: int = 10,
+        min_bkg_ratio: Optional[float] = None,
+) -> Dict[str, np.ndarray]:
+    sig_hist = np.asarray(sig_hist, dtype=float)
+    bkg_hist = np.asarray(bkg_hist, dtype=float)
+    bkg_w2_hist = np.asarray(bkg_w2_hist if bkg_w2_hist is not None else bkg_hist, dtype=float)
+    eps = 1e-12
+    total_sig = sig_hist.sum()
+    total_bkg = bkg_hist.sum()
+    if total_sig <= 0 or total_bkg <= 0:
+        empty = np.zeros(sig_hist.size + 1, dtype=float)
+        return {
+            "sig_eff": empty,
+            "bkg_eff": empty,
+            "bkg_eff_unc": empty,
+            "bkg_rej": empty,
+            "bkg_rej_unc": empty,
+            "sic": empty,
+            "sic_unc": empty,
+            "sic_full": empty,
+            "bkg_rej_full": empty,
+            "valid_mask": np.zeros_like(empty, dtype=bool),
+            "max_sic": 0.0,
+            "max_sic_unc": 0.0,
+            "best_idx": 0,
+            "min_bkg_idx": None,
+        }
+
+    cum_sig = np.concatenate(([0.0], np.cumsum(sig_hist[::-1])))
+    cum_bkg = np.concatenate(([0.0], np.cumsum(bkg_hist[::-1])))
+    cum_bkg2 = np.concatenate(([0.0], np.cumsum(bkg_w2_hist[::-1])))
+    sig_eff = cum_sig / (total_sig + eps)
+    bkg_eff = cum_bkg / (total_bkg + eps)
+    bkg_eff_unc = np.sqrt(cum_bkg2) / (total_bkg + eps)
+
+    bkg_rej_full = np.full_like(bkg_eff, np.nan, dtype=float)
+    positive_bkg = bkg_eff > 0
+    bkg_rej_full[positive_bkg] = 1.0 / bkg_eff[positive_bkg]
+    bkg_rej_unc = np.full_like(bkg_eff, np.nan, dtype=float)
+    bkg_rej_unc[positive_bkg] = bkg_eff_unc[positive_bkg] / (bkg_eff[positive_bkg] ** 2 + eps)
+    sic_full = np.full_like(sig_eff, np.nan, dtype=float)
+    sic_full[positive_bkg] = sig_eff[positive_bkg] * np.sqrt(bkg_rej_full[positive_bkg])
+
+    min_bkg_eff = 0.0 if min_bkg_ratio is None else min_bkg_ratio
+    valid = (bkg_eff > min_bkg_eff) & (cum_bkg >= min_bkg_events)
+    bkg_rej = np.full_like(bkg_eff, np.nan, dtype=float)
+    sic = np.full_like(sig_eff, np.nan, dtype=float)
+    sic_unc = np.full_like(sig_eff, np.nan, dtype=float)
+    bkg_rej[valid] = bkg_rej_full[valid]
+    sic[valid] = sic_full[valid]
+    sic_unc[valid] = sig_eff[valid] * 0.5 / np.sqrt(bkg_rej[valid] + eps) * bkg_rej_unc[valid]
+
+    if np.any(np.isfinite(sic)):
+        best_idx = int(np.nanargmax(sic))
+        max_sic = float(sic[best_idx])
+        max_sic_unc = float(sic_unc[best_idx])
+    else:
+        best_idx = 0
+        max_sic = 0.0
+        max_sic_unc = 0.0
+
+    valid_indices = np.flatnonzero(valid)
+    return {
+        "sig_eff": sig_eff,
+        "bkg_eff": bkg_eff,
+        "bkg_eff_unc": bkg_eff_unc,
+        "bkg_rej": bkg_rej,
+        "bkg_rej_unc": bkg_rej_unc,
+        "sic": sic,
+        "sic_unc": sic_unc,
+        "sic_full": sic_full,
+        "bkg_rej_full": bkg_rej_full,
+        "valid_mask": valid,
+        "max_sic": max_sic,
+        "max_sic_unc": max_sic_unc,
+        "best_idx": best_idx,
+        "min_bkg_idx": int(valid_indices[0]) if valid_indices.size else None,
+    }
+
+
 def find_score_at_min_bkg(
         scores: np.ndarray,
         targets: np.ndarray,
@@ -316,134 +533,6 @@ def find_score_at_min_bkg(
     return bkg_scores[idx]
 
 
-def plot_sic_diagnostics(
-        targets: np.ndarray,
-        scores: np.ndarray,
-        weights: np.ndarray,
-        sic_result: Dict[str, np.ndarray],
-        min_bkg_events: int = 0,
-        *,
-        figsize: Tuple[int, int] = (12, 12),
-        dpi: int = 300,
-):
-    """Create a four-panel diagnostic plot for SIC-related curves."""
-
-    import matplotlib.pyplot as plt
-
-    fig, axs = plt.subplots(2, 2, figsize=figsize, dpi=dpi, constrained_layout=True)
-
-    sig_eff = sic_result["sig_eff"]
-    bkg_eff = sic_result["bkg_eff"]
-    bkg_eff_unc = sic_result["bkg_eff_unc"]
-    sic = sic_result["sic"]
-    sic_unc = sic_result["sic_unc"]
-    bkg_rej = sic_result["bkg_rej"]
-    bkg_rej_unc = sic_result["bkg_rej_unc"]
-    sic_full = sic_result.get("sic_full", sic)
-    bkg_rej_full = sic_result.get("bkg_rej_full", bkg_rej)
-    valid_mask = sic_result.get("valid_mask", np.isfinite(sic))
-    min_bkg_idx = sic_result.get("min_bkg_idx")
-
-    min_bkg_line_x = None
-    if min_bkg_idx is not None:
-        min_bkg_line_x = float(sig_eff[min_bkg_idx])
-
-    # ROC curve
-    axs[0, 0].plot(sig_eff, bkg_eff, lw=2, color="#1f77b4")
-    axs[0, 0].set_ylabel("Background efficiency (FPR)")
-    axs[0, 0].set_xlabel("Signal efficiency (TPR)")
-    axs[0, 0].set_title("ROC curve")
-    axs[0, 0].set_xlim(0.0, 1.0)
-    # SIC vs signal efficiency
-    axs[0, 1].plot(sig_eff, sic_full, lw=2, color="#d62728", alpha=0.5)
-    axs[0, 1].plot(sig_eff, sic, lw=2, color="#d62728")
-    axs[0, 1].fill_between(
-        sig_eff,
-        sic - sic_unc,
-        sic + sic_unc,
-        where=valid_mask,
-        color="#d62728",
-        alpha=0.2,
-    )
-    axs[0, 1].set_xlabel("Signal efficiency")
-    axs[0, 1].set_ylabel("SIC")
-    axs[0, 1].set_title("SIC vs signal efficiency")
-    axs[0, 1].set_xlim(0.0, 1.0)
-    # Background rejection
-    axs[1, 0].plot(sig_eff, bkg_rej_full, lw=2, color="#2ca02c", alpha=0.5)
-    axs[1, 0].plot(sig_eff, bkg_rej, lw=2, color="#2ca02c")
-    axs[1, 0].fill_between(
-        sig_eff,
-        bkg_rej - bkg_rej_unc,
-        bkg_rej + bkg_rej_unc,
-        where=valid_mask,
-        color="#2ca02c",
-        alpha=0.2,
-    )
-    axs[1, 0].set_xlabel("Signal efficiency")
-    axs[1, 0].set_ylabel("Background rejection (1 / ε_b)")
-    axs[1, 0].set_yscale("log")
-    axs[1, 0].set_title("Background rejection")
-    axs[1, 0].set_xlim(0.0, 1.0)
-    # Score distributions (signal vs background)
-    sig_mask = targets == 1
-    bkg_mask = targets == 0
-    axs[1, 1].hist(
-        scores[bkg_mask],
-        bins=50,
-        weights=weights[bkg_mask] if weights is not None else None,
-        histtype="step",
-        density=True,
-        label="Background",
-        linewidth=2,
-        color="#1f77b4",
-    )
-    axs[1, 1].hist(
-        scores[sig_mask],
-        bins=50,
-        weights=weights[sig_mask] if weights is not None else None,
-        histtype="step",
-        density=True,
-        label="Signal",
-        linewidth=2,
-        color="#d62728",
-    )
-    axs[1, 1].set_xlabel("Classifier score")
-    axs[1, 1].set_ylabel("Normalized events")
-    axs[1, 1].set_yscale("log")
-    axs[1, 1].legend()
-    axs[1, 1].set_title("Score distribution")
-    axs[1, 1].set_xlim(0.0, 1.0)
-
-    if min_bkg_line_x is not None:
-        score_cut = find_score_at_min_bkg(
-            scores=scores,
-            targets=targets,
-            weights=weights,
-            min_bkg_events=min_bkg_events,
-        )
-
-        if score_cut is not None:
-            axs[1, 1].axvline(
-                score_cut,
-                color="gray", linestyle="--", alpha=0.75, lw=2,
-                label=f"bkg = {min_bkg_events:g}",
-            )
-
-        for ax in [axs[0, 0], axs[0, 1], axs[1, 0]]:
-            ax.axvline(min_bkg_line_x, color="gray", linestyle="--", alpha=0.75, lw=2, label=f"bkg={min_bkg_events:5d}")
-        axs[0, 0].legend(loc="lower right")
-        axs[0, 1].legend(loc="upper right")
-        axs[1, 0].legend(loc="upper right")
-
-    for ax in axs.flat:
-        ax.grid(True, alpha=0.3)
-
-    fig.suptitle("SIC diagnostics", fontsize=14)
-
-    return fig
-
-
 def calculate_physics_metrics(
         logits: np.ndarray,
         targets: np.ndarray,
@@ -460,7 +549,7 @@ def calculate_physics_metrics(
         Zb: int = 5,
         min_bkg_per_bin: int = 3,
         min_mc_stats: float = 1.0,
-        include_signal_in_stat: bool = True,
+        include_signal_in_stat: bool = False,
         edges_low=None,
         edges_high=None,
         logger: logging.Logger | None = None,
@@ -514,6 +603,8 @@ def calculate_physics_metrics(
     }
 
     if log_plots:
+        from .plots import close_figure, plot_sic_diagnostics
+
         fig = plot_sic_diagnostics(
             targets=targets,
             scores=scores,
@@ -537,8 +628,7 @@ def calculate_physics_metrics(
                 wandb_run.log({log_name: wandb.Image(fig)}, **log_kwargs)
             finally:
                 pass
-        import matplotlib.pyplot as plt
-        plt.close(fig)
+        close_figure(fig)
 
     return metrics
 
