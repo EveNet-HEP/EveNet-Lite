@@ -11,6 +11,11 @@ from scipy.special import expit, softmax
 from .transform_binning import binned_sig
 
 
+def integrate_trapezoid(y: np.ndarray, x: np.ndarray) -> float:
+    fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    return float(fn(y, x))
+
+
 def _flatten_ensemble(
         logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -158,7 +163,7 @@ def classification_auc_from_score_histograms(score_histograms: np.ndarray) -> np
             continue
         sig_eff = np.concatenate(([0.0], np.cumsum(sig_hist[::-1]) / total_sig))
         bkg_eff = np.concatenate(([0.0], np.cumsum(bkg_hist[::-1]) / total_bkg))
-        class_auc[cls] = float(np.trapz(sig_eff, bkg_eff))
+        class_auc[cls] = integrate_trapezoid(sig_eff, bkg_eff)
     return class_auc
 
 
@@ -259,7 +264,7 @@ def weighted_roc_curve(
     fpr_interp = np.interp(tpr_uniform, fpr_raw, fpr_clipped)
     sigma_fpr_interp = np.interp(tpr_uniform, tpr_raw, sigma_fpr_raw)
 
-    auc = np.trapz(tpr_raw, fpr_raw)
+    auc = integrate_trapezoid(tpr_raw, fpr_raw)
     return auc, fpr_interp, tpr_uniform, sigma_fpr_interp
 
 

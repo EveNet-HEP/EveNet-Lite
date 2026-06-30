@@ -56,6 +56,7 @@ class ParameterRandomizationCallback(Callback):
             max_values: Optional[Sequence[float]] = None,
             apply_to_validation: bool = True,
             pool_from_signal: bool = False,
+            label_head: Optional[str] = None,
     ) -> None:
         self.param_key = param_key
         self.background_label = background_label
@@ -69,6 +70,7 @@ class ParameterRandomizationCallback(Callback):
         self._warned_bounds = False
         self._pool_from_signal = pool_from_signal
         self._pool_tensor: Optional[torch.Tensor] = None
+        self.label_head = label_head
 
     def _maybe_warn(self, message: str) -> None:
         if not self._warned_missing_params:
@@ -118,14 +120,28 @@ class ParameterRandomizationCallback(Callback):
         if not self._pool_from_signal:
             return
         if hasattr(trainer, "train_dataset"):
-            raw_params = torch.as_tensor(trainer.train_dataset.raw_features.get(self.param_key))
-            targets = torch.as_tensor(trainer.train_dataset.labels)
-            if raw_params is not None and targets is not None:
-                signal_mask = targets != self.background_label
-                signal_params = raw_params[signal_mask]
-                pool = torch.unique(signal_params, dim=0).float()
-                self._pool_tensor = pool
-                print("Found signal pool with", self._pool_tensor.shape[0], "unique entries.")
+            raw_param_values = trainer.train_dataset.raw_features.get(self.param_key)
+            if raw_param_values is None:
+                self._maybe_warn(
+                    f"ParameterRandomizationCallback skipped signal pool because '{self.param_key}' is absent."
+                )
+                return
+            raw_params = torch.as_tensor(raw_param_values)
+            targets = self._select_targets(trainer.train_dataset.labels)
+            signal_mask = targets != self.background_label
+            signal_params = raw_params[signal_mask]
+            pool = torch.unique(signal_params, dim=0).float()
+            self._pool_tensor = pool
+            print("Found signal pool with", self._pool_tensor.shape[0], "unique entries.")
+
+    def _select_targets(self, targets: Any) -> torch.Tensor:
+        if isinstance(targets, dict):
+            if self.label_head is None:
+                raise ValueError("ParameterRandomizationCallback requires label_head when labels are multi-head")
+            if self.label_head not in targets:
+                raise ValueError(f"label_head {self.label_head!r} is not present in multi-head labels")
+            return torch.as_tensor(targets[self.label_head])
+        return torch.as_tensor(targets)
 
     def on_train_start(self, trainer: "Trainer") -> None:
         if (self._configured_min is None or self._configured_max is None) and hasattr(
@@ -153,6 +169,7 @@ class ParameterRandomizationCallback(Callback):
         targets = batch.get("targets")
         if targets is None:
             return
+        targets = self._select_targets(targets)
 
         if self.param_key not in features:
             if training:
@@ -163,12 +180,12 @@ class ParameterRandomizationCallback(Callback):
 
         params = features[self.param_key]
         if params.dim() < 2:
-            self._maybe_warm("wrong param dim")
+            self._maybe_warn("wrong param dim")
             return
 
         bounds = self._resolve_bounds(params.shape[-1], params.device)
         if bounds is None:
-            self._maybe_warm("no bounds")
+            self._maybe_warn("no bounds")
             return
 
 
