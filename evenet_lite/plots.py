@@ -159,7 +159,7 @@ def plot_rejection_curves(
         )
     ax.set_xlabel("Signal efficiency")
     ax.set_ylabel("Background rejection (1 / background efficiency)")
-    ax.set_yscale("log")
+    _set_plain_log_y(ax)
     ax.set_xlim(0.0, 1.0)
     ax.set_title(title)
     _clean_spines(ax)
@@ -207,7 +207,7 @@ def plot_rejection_curves_from_histograms(
         )
     ax.set_xlabel("Signal efficiency")
     ax.set_ylabel("Background rejection (1 / background efficiency)")
-    ax.set_yscale("log")
+    _set_plain_log_y(ax)
     ax.set_xlim(0.0, 1.0)
     ax.set_title(title)
     _clean_spines(ax)
@@ -256,7 +256,7 @@ def plot_score_distributions(
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Predicted probability")
         ax.set_ylabel("Density")
-        ax.set_yscale("log")
+        _set_plain_log_y(ax)
         _clean_spines(ax)
     handles, labels = axes.flat[0].get_legend_handles_labels()
     if handles:
@@ -308,7 +308,7 @@ def plot_score_distributions_from_histograms(
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Predicted probability")
         ax.set_ylabel("Density")
-        ax.set_yscale("log")
+        _set_plain_log_y(ax)
         _clean_spines(ax)
     handles, labels = axes.flat[0].get_legend_handles_labels()
     if handles:
@@ -341,6 +341,11 @@ def _plain_number(x, _pos):
     if x >= 1:
         return f"{x:g}"
     return f"{x:.2g}"
+
+
+def _set_plain_log_y(ax) -> None:
+    ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(FuncFormatter(_plain_number))
 
 
 def plot_sic_diagnostics(
@@ -387,8 +392,7 @@ def plot_sic_diagnostics(
     )
     axs[1, 0].set_xlabel("Signal efficiency")
     axs[1, 0].set_ylabel("Background rejection")
-    axs[1, 0].set_yscale("log")
-    axs[1, 0].yaxis.set_major_formatter(FuncFormatter(_plain_number))
+    _set_plain_log_y(axs[1, 0])
     axs[1, 0].set_title("Background rejection")
     axs[1, 0].set_xlim(0.0, 1.0)
 
@@ -402,7 +406,7 @@ def plot_sic_diagnostics(
                        linewidth=1.6, color=PALETTE[1], label="Signal")
     axs[1, 1].set_xlabel("Classifier score")
     axs[1, 1].set_ylabel("Density")
-    axs[1, 1].set_yscale("log")
+    _set_plain_log_y(axs[1, 1])
     axs[1, 1].set_title("Score distribution")
     axs[1, 1].set_xlim(0.0, 1.0)
     axs[1, 1].legend(frameon=False)
@@ -440,7 +444,7 @@ def plot_sic_summary(
     axs[0].set_xlabel("Signal efficiency")
     axs[0].set_ylabel("Background efficiency")
     axs[0].set_xlim(0.0, 1.0)
-    axs[0].set_yscale("log")
+    _set_plain_log_y(axs[0])
 
     axs[1].plot(sig_eff, sic_full, lw=1.2, color=PALETTE[1], alpha=0.45)
     axs[1].plot(sig_eff, sic, lw=1.6, color=PALETTE[1])
@@ -452,7 +456,7 @@ def plot_sic_summary(
     axs[2].plot(sig_eff, bkg_rej, lw=1.6, color=PALETTE[2])
     axs[2].set_xlabel("Signal efficiency")
     axs[2].set_ylabel("Background rejection")
-    axs[2].set_yscale("log")
+    _set_plain_log_y(axs[2])
     axs[2].set_xlim(0.0, 1.0)
 
     for ax in axs:
