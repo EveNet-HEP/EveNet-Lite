@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from evenet_lite.data import EvenetTensorDataset
-from evenet_lite.metrics import compute_classification_metrics
+from evenet_lite.metrics import compute_classification_metrics, compute_loss
 from evenet_lite.trainer import Trainer, TrainerConfig
 
 
@@ -39,7 +39,41 @@ class MultiHeadLinearClassifier(torch.nn.Module):
         return {"cls1": self.cls1(globals), "cls2": self.cls2(globals)}
 
 
+class ThreeHeadLinearClassifier(torch.nn.Module):
+    num_classes = {"kl1": 2, "kl5": 2, "vbf": 2}
+
+    def __init__(self):
+        super().__init__()
+        self.kl1 = torch.nn.Linear(6, 2)
+        self.kl5 = torch.nn.Linear(6, 2)
+        self.vbf = torch.nn.Linear(6, 2)
+
+    def forward(self, globals: torch.Tensor, **_: torch.Tensor):  # type: ignore[override]
+        return {
+            "kl1": self.kl1(globals),
+            "kl5": self.kl5(globals),
+            "vbf": self.vbf(globals),
+        }
+
+
 class MulticlassMetricsTest(unittest.TestCase):
+    def test_compute_loss_ignores_ignore_index(self):
+        logits = torch.tensor(
+            [
+                [4.0, 0.0],
+                [0.0, 4.0],
+                [0.0, 4.0],
+            ]
+        )
+        targets = torch.tensor([0, -100, 1])
+
+        actual = compute_loss(logits, targets, None, gamma=0.0, ignore_index=-100)
+        expected = compute_loss(logits[[0, 2]], targets[[0, 2]], None, gamma=0.0, ignore_index=-100)
+
+        torch.testing.assert_close(actual, expected)
+        all_ignored = compute_loss(logits, torch.full_like(targets, -100), None, ignore_index=-100)
+        torch.testing.assert_close(all_ignored, torch.tensor(0.0))
+
     def test_compute_classification_metrics_weighted_multiclass(self):
         logits = np.array(
             [
@@ -283,6 +317,46 @@ class MulticlassMetricsTest(unittest.TestCase):
         trainer.train((features, labels, None), None, None, epochs=1, batch_size=2, sampler=None)
 
         self.assertEqual(trainer.global_step, 2)
+
+    def test_multi_head_ignore_index_skips_head_specific_rows(self):
+        features = {"globals": torch.randn(4, 6)}
+        labels = {
+            "kl1": torch.tensor([1, -100, -100, 0]),
+            "kl5": torch.tensor([-100, 1, -100, 0]),
+            "vbf": torch.tensor([-100, -100, 1, 0]),
+        }
+        class_labels = {
+            "kl1": {"name": ["bkg", "sig"], "lambda": 1.0},
+            "kl5": {"name": ["bkg", "sig"], "lambda": 1.0},
+            "vbf": {"name": ["bkg", "sig"], "lambda": 1.0},
+        }
+        trainer = Trainer(
+            ThreeHeadLinearClassifier(),
+            {"globals": [f"g{i}" for i in range(6)]},
+            TrainerConfig(
+                device="cpu",
+                num_workers=0,
+                use_wandb=False,
+                compute_physics_metrics=False,
+                loss_gamma={"kl1": 0.0, "kl5": 0.0, "vbf": 0.0},
+                lr=[1e-3],
+                weight_decay=[0.0],
+                module_lists=[["kl1", "kl5", "vbf"]],
+                ignore_index=-100,
+            ),
+            class_labels=class_labels,
+        )
+
+        trainer.train((features, labels, None), None, None, epochs=1, batch_size=2, sampler=None)
+        metrics = trainer.evaluate(EvenetTensorDataset(features, labels), batch_size=2)
+
+        self.assertEqual(trainer.global_step, 2)
+        self.assertEqual(metrics["kl1/support_bkg"], 1.0)
+        self.assertEqual(metrics["kl1/support_sig"], 1.0)
+        self.assertEqual(metrics["kl5/support_bkg"], 1.0)
+        self.assertEqual(metrics["kl5/support_sig"], 1.0)
+        self.assertEqual(metrics["vbf/support_bkg"], 1.0)
+        self.assertEqual(metrics["vbf/support_sig"], 1.0)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ def run_evenet_lite_training(
     debug: bool = False,
     log_level: int = logging.INFO,
     loss_gamma: Any = 0.0,
+    ignore_index: int = -100,
     **classifier_kwargs: Any,
 ) -> EvenetLiteClassifier:
     """Convenience entrypoint for running Evenet-Lite training on prepared tensors.
@@ -102,6 +103,7 @@ def run_evenet_lite_training(
         monitor_metric: Metric name used for checkpoint ranking.
         minimize_metric: Whether ``monitor_metric`` should be minimized.
         loss_gamma: Focal-loss gamma parameter, or ``head -> gamma`` for multi-head training.
+        ignore_index: Label value skipped per head during validation, loss, metrics, plots, and physics metrics.
         debug: Whether to enable verbose ``DebugCallback`` logging.
         log_level: Logging level applied before runner diagnostics and forwarded
             to the classifier when unspecified.
@@ -122,7 +124,12 @@ def run_evenet_lite_training(
     if "log_level" not in classifier_kwargs:
         classifier_kwargs["log_level"] = log_level
 
-    classifier = EvenetLiteClassifier(class_labels=class_labels, loss_gamma=loss_gamma, **classifier_kwargs)
+    classifier = EvenetLiteClassifier(
+        class_labels=class_labels,
+        loss_gamma=loss_gamma,
+        ignore_index=ignore_index,
+        **classifier_kwargs,
+    )
 
     train_payload = (train_features, train_labels, train_weights)
     val_payload = None

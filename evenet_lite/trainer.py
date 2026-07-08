@@ -114,6 +114,7 @@ class TrainerConfig:
     early_stop_patience: int = 0
     find_unused_parameters: bool = True
     use_peft: bool = False  # new field to indicate whether to use PEFT
+    ignore_index: int = -100
 
 
 class Trainer:
@@ -143,6 +144,16 @@ class Trainer:
         self.head_class_labels, self.head_loss_weights, self.multi_head = normalize_class_heads(class_labels)
         self.head_names = list(self.head_class_labels)
         self.head_num_classes = {head: len(labels) for head, labels in self.head_class_labels.items()}
+        self.ignore_index = int(config.ignore_index)
+        overlapping = {
+            head: num_classes
+            for head, num_classes in self.head_num_classes.items()
+            if 0 <= self.ignore_index < num_classes
+        }
+        if overlapping:
+            raise ValueError(
+                f"ignore_index={self.ignore_index} overlaps class label range for heads {list(overlapping)}"
+            )
         self.head_loss_gamma = {}
         for head, value in normalize_head_config(config.loss_gamma, self.head_names, "loss_gamma").items():
             try:
@@ -291,9 +302,21 @@ class Trainer:
     def _all_gather_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.world_size <= 1:
             return tensor
-        tensor_list = [torch.zeros_like(tensor) for _ in range(self.world_size)]
+        local_size = torch.tensor([tensor.shape[0]], device=tensor.device, dtype=torch.long)
+        size_list = [torch.zeros_like(local_size) for _ in range(self.world_size)]
+        dist.all_gather(size_list, local_size)
+        sizes = [int(size.item()) for size in size_list]
+        max_size = max(sizes)
+        if max_size == 0:
+            return tensor.new_empty((0, *tensor.shape[1:]))
+
+        if tensor.shape[0] < max_size:
+            pad_shape = (max_size - tensor.shape[0], *tensor.shape[1:])
+            tensor = torch.cat([tensor, tensor.new_zeros(pad_shape)], dim=0)
+
+        tensor_list = [tensor.new_zeros((max_size, *tensor.shape[1:])) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, tensor)
-        return torch.cat(tensor_list, dim=0)
+        return torch.cat([gathered[:size] for gathered, size in zip(tensor_list, sizes)], dim=0)
 
     def _all_reduce_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.world_size > 1:
@@ -327,6 +350,10 @@ class Trainer:
 
     def _num_classes_for_head(self, head: str) -> int:
         return self.head_num_classes[head]
+
+    def _valid_label_mask(self, labels: torch.Tensor, head: str) -> torch.Tensor:
+        num_classes = self._num_classes_for_head(head)
+        return (labels != self.ignore_index) & (labels >= 0) & (labels < num_classes)
 
     def _targets_by_head(self, targets: Any, what: str = "labels") -> Dict[str, torch.Tensor]:
         return normalize_head_tensors(targets, self.head_names, what)
@@ -371,12 +398,15 @@ class Trainer:
             if labels.numel() == 0:
                 continue
             num_classes = self._num_classes_for_head(head)
-            min_label = int(labels.min().item())
-            max_label = int(labels.max().item())
-            if min_label < 0 or max_label >= num_classes:
+            invalid = (labels != self.ignore_index) & ((labels < 0) | (labels >= num_classes))
+            if torch.any(invalid):
+                invalid_labels = labels[invalid]
+                min_label = int(invalid_labels.min().item())
+                max_label = int(invalid_labels.max().item())
                 raise ValueError(
                     f"{split}_labels[{head!r}] contains class index range [{min_label}, {max_label}], "
-                    f"but class_labels[{head!r}] defines {num_classes} classes"
+                    f"but class_labels[{head!r}] defines {num_classes} classes and "
+                    f"ignore_index is {self.ignore_index}"
                 )
 
     def _validate_batch_outputs(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> None:
@@ -474,12 +504,14 @@ class Trainer:
     def _class_stats(self, dataset: EvenetTensorDataset, head: str) -> Tuple[int, torch.Tensor, torch.Tensor]:
         labels = dataset.labels_for(head).long()
         num_classes = self._num_classes_for_head(head)
+        valid_labels = self._valid_label_mask(labels, head)
+        labels = labels[valid_labels]
         counts = torch.bincount(labels, minlength=num_classes)
 
         if dataset.sample_weights is None:
             weights = torch.ones_like(labels, dtype=torch.float32)
         else:
-            weights = torch.as_tensor(dataset.sample_weights, dtype=torch.float32)
+            weights = torch.as_tensor(dataset.sample_weights, dtype=torch.float32)[valid_labels]
             finite_mask = torch.isfinite(weights)
             weights = torch.where(finite_mask, weights, torch.zeros_like(weights))
 
@@ -1119,6 +1151,7 @@ class Trainer:
                         targets_by_head[head],
                         weight_tensor_input,
                         gamma=self.head_loss_gamma[head],
+                        ignore_index=self.ignore_index,
                     )
                     head_losses[head] = head_loss
                     loss = loss + self.head_loss_weights[head] * head_loss
@@ -1151,22 +1184,25 @@ class Trainer:
                 outputs = outputs_by_head[head]
                 targets = targets_by_head[head]
                 num_classes = self._num_classes_for_head(head)
+                valid_labels = self._valid_label_mask(targets, head)
+                valid_count = int(valid_labels.sum().item())
                 loss_key = self._metric_key(head, "loss")
                 acc_key = self._metric_key(head, "accuracy")
                 head_loss_value = head_losses[head].detach()
-                if torch.isfinite(head_loss_value):
-                    metric_sum[loss_key] += head_loss_value.item() * targets.size(0)
-                    metric_count[loss_key] += targets.size(0)
+                if torch.isfinite(head_loss_value) and valid_count > 0:
+                    metric_sum[loss_key] += head_loss_value.item() * valid_count
+                    metric_count[loss_key] += valid_count
 
                 logits_for_metrics = outputs.mean(dim=0) if outputs.dim() == 3 else outputs
                 preds = torch.argmax(logits_for_metrics, dim=1)
-                batch_accuracy = compute_accuracy(outputs, targets)
+                batch_accuracy = compute_accuracy(outputs, targets, ignore_index=self.ignore_index)
                 tracker = metric_trackers.get(head)
                 if tracker is not None:
-                    tracker.update(preds, targets)
+                    if valid_count > 0:
+                        tracker.update(preds[valid_labels], targets[valid_labels])
                 else:
-                    metric_sum[acc_key] += batch_accuracy * targets.size(0)
-                    metric_count[acc_key] += targets.size(0)
+                    metric_sum[acc_key] += batch_accuracy * valid_count
+                    metric_count[acc_key] += valid_count
 
                 batch_metrics[loss_key] = head_loss_value.item()
                 batch_metrics[acc_key] = batch_accuracy
@@ -1177,8 +1213,7 @@ class Trainer:
                     else torch.ones_like(targets, dtype=torch.float32, device=self.device)
                 )
                 valid = (
-                    (targets >= 0)
-                    & (targets < num_classes)
+                    valid_labels
                     & (preds >= 0)
                     & (preds < num_classes)
                     & torch.isfinite(metric_weights)
@@ -1200,8 +1235,7 @@ class Trainer:
                 probabilities = self._classification_probabilities_tensor(logits_for_metrics.detach().float())
                 score_classes = min(num_classes, probabilities.shape[1])
                 valid_scores = (
-                    (targets >= 0)
-                    & (targets < num_classes)
+                    valid_labels
                     & torch.isfinite(metric_weights)
                     & (metric_weights >= 0)
                 )
@@ -1223,10 +1257,10 @@ class Trainer:
                         minlength=num_classes * num_classes * score_bins,
                     )
 
-                if state["collect_physics"]:
-                    state["physics_probs"].append(logits_for_metrics.detach())
-                    state["physics_targets"].append(targets.detach())
-                    state["physics_weights"].append(metric_weights.detach())
+                if state["collect_physics"] and torch.any(valid_scores):
+                    state["physics_probs"].append(logits_for_metrics.detach()[valid_scores])
+                    state["physics_targets"].append(targets.detach()[valid_scores])
+                    state["physics_weights"].append(metric_weights.detach()[valid_scores])
 
             reduced_loss = self._reduce_mean_scalar(loss.item())
             for cb in self.callbacks:
@@ -2065,11 +2099,12 @@ class Trainer:
                 head_labels,
                 valid_weight_tensor,
                 gamma=self.head_loss_gamma[head],
+                ignore_index=self.ignore_index,
             )
             total_loss += self.head_loss_weights[head] * float(head_loss.item())
             head_metrics: Dict[str, Any] = {
                 "loss": float(head_loss.item()),
-                "accuracy": float(compute_accuracy(head_preds, head_labels)),
+                "accuracy": float(compute_accuracy(head_preds, head_labels, ignore_index=self.ignore_index)),
             }
             weights_np = (
                 weights.numpy()
@@ -2086,13 +2121,17 @@ class Trainer:
             )
             head_metrics.update(self._classification_scalar_metrics(class_metric_arrays, head=head))
             probs = class_metric_arrays["probabilities"]
+            valid_mask_np = class_metric_arrays["valid_mask"]
+            metric_preds_np = preds_np[valid_mask_np]
+            metric_labels_np = class_metric_arrays["targets"]
+            metric_weights_np = class_metric_arrays["weights"]
             self._log_classification_plots(
                 class_metric_arrays,
                 "test",
                 head=head,
                 probs=probs,
-                targets=labels_np,
-                weights=weights_np,
+                targets=metric_labels_np,
+                weights=metric_weights_np,
             )
 
             head_base = None
@@ -2105,20 +2144,20 @@ class Trainer:
                 self._save_classification_plots(
                     head_base,
                     probs,
-                    labels_np,
-                    weights_np,
+                    metric_labels_np,
+                    metric_weights_np,
                     class_metric_arrays,
                     "test",
                     head=head,
                 )
 
             num_classes = self._num_classes_for_head(head)
-            if self.config.compute_physics_metrics and head_preds.numel() > 0 and num_classes == 2:
+            if self.config.compute_physics_metrics and metric_preds_np.size > 0 and num_classes == 2:
                 head_metrics.update(
                     calculate_physics_metrics(
-                        logits=preds_np,
-                        targets=labels_np,
-                        weights=weights_np,
+                        logits=metric_preds_np,
+                        targets=metric_labels_np,
+                        weights=metric_weights_np,
                         training=False,
                         log_plots=self.wandb_run is not None and not self.multi_head,
                         wandb_run=self.wandb_run,
@@ -2126,12 +2165,12 @@ class Trainer:
                         **self._physics_metric_kwargs(head),
                     )
                 )
-            elif self.config.compute_physics_metrics and head_preds.numel() > 0 and num_classes > 2:
+            elif self.config.compute_physics_metrics and metric_preds_np.size > 0 and num_classes > 2:
                 head_metrics.update(
                     self._compute_multiclass_physics_metrics_from_arrays(
                         probs,
-                        labels_np,
-                        weights_np,
+                        metric_labels_np,
+                        metric_weights_np,
                         training=False,
                         head=head,
                         output_base=head_base,
@@ -2161,6 +2200,9 @@ class Trainer:
                 f"{name}={int((head_labels == idx).sum().item())}"
                 for idx, name in enumerate(class_names)
             )
+            ignored = int((head_labels == self.ignore_index).sum().item())
+            if ignored:
+                counts = f"{counts}, ignored={ignored}"
             class_count_parts.append(f"{head}: {counts}" if self.multi_head else counts)
 
         if self.multi_head:

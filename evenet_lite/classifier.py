@@ -103,6 +103,7 @@ class EvenetLiteClassifier:
             n_ensemble: int = 1,
             ensemble_mode: str = "independent",
             loss_gamma: Any = 0.0,
+            ignore_index: int = -100,
             use_adapter: bool = False,
             use_peft: bool = False,
     ) -> None:
@@ -162,6 +163,7 @@ class EvenetLiteClassifier:
             wandb=wandb,
             num_workers=num_workers,
             loss_gamma=loss_gamma,
+            ignore_index=ignore_index,
             use_peft=use_peft,
         )
         self.trainer: Optional[Trainer] = None

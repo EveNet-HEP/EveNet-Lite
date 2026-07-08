@@ -23,14 +23,14 @@ Usage (CPU example)::
 import argparse
 from typing import Callable, Dict
 
-from . import grad_sync_test, metric_reduction_test, sampler_coverage_test, weighted_sampler_test
+from . import grad_sync_test, metric_reduction_test, sampler_coverage_test, variable_gather_test, weighted_sampler_test
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DDP and sampler sanity tests")
     parser.add_argument(
         "--test",
-        choices=["grad", "metrics", "sampler", "weighted_sampler"],
+        choices=["grad", "metrics", "sampler", "weighted_sampler", "variable_gather"],
         required=True,
         help="Which test to run",
     )
@@ -41,6 +41,7 @@ def main() -> None:
         "grad": grad_sync_test.run,
         "metrics": metric_reduction_test.run,
         "sampler": sampler_coverage_test.run,
+        "variable_gather": variable_gather_test.run,
         "weighted_sampler": weighted_sampler_test.run,
     }
 

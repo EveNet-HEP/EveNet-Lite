@@ -161,10 +161,13 @@ train_labels = {
     "cls1": y_train_cls1,
     "cls2": y_train_cls2,
 }
+# Use -100 for rows that should not train or score a given head.
+train_labels["cls1"][cls2_only_rows] = -100
 
 clf = EvenetLiteClassifier(
     class_labels=class_labels,
     loss_gamma={"cls1": 0.0, "cls2": 2.0},
+    ignore_index=-100,
 )
 clf.fit(
     train_data=(train_features, train_labels, train_weights),
@@ -175,6 +178,7 @@ clf.fit(
 
 All multi-head dictionaries must use the same head names. `train_labels`, `val_labels`, `eval_labels`,
 `loss_gamma`, and non-empty `physics_metric_config` are validated against `class_labels` and abort on mismatch.
+Labels equal to `ignore_index` are skipped per head in validation, loss, metrics, plots, and physics metrics.
 Metrics and W&B logs are prefixed by head name, e.g. `cls1/accuracy` and `cls2/metric-AUC/val_weighted`.
 Legacy list `class_labels` keeps the previous single-head behavior.
 
@@ -204,6 +208,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `pretrained_path` / `pretrained_repo_id` / `pretrained_filename` / `pretrained_cache_dir` | varies                 | Location details for pretrained checkpoints.                                                   |
 | `num_workers`                                                                             | 0                      | Number of processes passing to pytorch `DataLoader`                                              |
 | `loss_gamma`                                                                              | `0.0`                  | Focal-loss gamma; use `head -> gamma` when `class_labels` is a multi-head dictionary.           |
+| `ignore_index`                                                                            | `-100`                 | Label value skipped per head during validation, loss, metrics, plots, and physics metrics.       |
 
 ### `EvenetLiteClassifier.fit`
 
@@ -261,6 +266,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `physics_metric_config`                                             | `None`                               | Optional `calculate_physics_metrics` keyword overrides; use `head -> config` for multi-head runs. |
 | `debug`                                                             | `False`                              | Enables verbose debugging callback and sampler diagnostics.        |
 | `loss_gamma`                                                        | `0.0`                                | Focal-loss gamma; use `head -> gamma` for multi-head runs.         |
+| `ignore_index`                                                      | `-100`                               | Label value skipped per head during validation, loss, metrics, plots, and physics metrics. |
 | `log_level`                                                         | `logging.INFO`                       | Logging level set before runner diagnostics.                       |
 | `**classifier_kwargs`                                               | —                                    | Additional arguments forwarded directly to `EvenetLiteClassifier`. |
 
