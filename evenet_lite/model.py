@@ -10,7 +10,8 @@ resolve at runtime.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from collections.abc import Mapping
+from typing import Any, Dict, List
 
 import torch
 from torch import nn
@@ -19,19 +20,19 @@ from evenet.control.global_config import DotDict
 from evenet.network.body.embedding import GlobalVectorEmbedding, PETBody
 from evenet.network.body.object_encoder import ObjectEncoder
 from evenet.network.heads.classification.classification_head import ClassificationHead
+from .heads import DEFAULT_HEAD, normalize_class_heads
 
 
 def _build_classification_head(
     config: DotDict,
-    class_label: Dict[str, List[str]],
-    num_classes: Dict[str, int],
+    class_labels: List[str],
     input_dim: int,
 ) -> ClassificationHead:
     cls_cfg = config.Classification
     return ClassificationHead(
         input_dim=input_dim,
-        class_label=class_label,
-        event_num_classes=num_classes,
+        class_label={DEFAULT_HEAD: class_labels},
+        event_num_classes={DEFAULT_HEAD: len(class_labels)},
         num_layers=cls_cfg.num_classification_layers,
         hidden_dim=cls_cfg.hidden_dim,
         skip_connection=cls_cfg.skip_connection,
@@ -51,7 +52,32 @@ def _apply_classification_head(
         x_mask=input_point_cloud_mask,
         event_token=event_token,
     )
-    return classifications["classification/EVENT"]
+    return classifications[f"classification/{DEFAULT_HEAD}"]
+
+
+def _build_classification_heads(
+    config: DotDict,
+    head_class_labels: Dict[str, List[str]],
+    input_dim: int,
+) -> nn.ModuleDict:
+    return nn.ModuleDict(
+        {
+            head: _build_classification_head(config, labels, input_dim)
+            for head, labels in head_class_labels.items()
+        }
+    )
+
+
+def _apply_classification_heads(
+    classification_heads: nn.ModuleDict,
+    embeddings: torch.Tensor,
+    input_point_cloud_mask: torch.Tensor,
+    event_token: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    return {
+        head: _apply_classification_head(head_module, embeddings, input_point_cloud_mask, event_token)
+        for head, head_module in classification_heads.items()
+    }
 
 
 class EveNetBackbone(nn.Module):
@@ -168,14 +194,16 @@ class EveNetBackbone(nn.Module):
 class _EveNetLiteSingle(nn.Module):
     """Single EveNet backbone with classification head."""
 
-    def __init__(self, backbone: EveNetBackbone, classification_head: ClassificationHead) -> None:
+    def __init__(self, backbone: EveNetBackbone, classification_heads: nn.ModuleDict, return_dict: bool) -> None:
         super().__init__()
         self.backbone = backbone
-        self.Classification = classification_head
+        self.Classification = classification_heads
+        self.return_dict = return_dict
 
-    def forward(self, x: torch.Tensor, x_mask: torch.Tensor, globals: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor, globals: torch.Tensor) -> torch.Tensor | Dict[str, torch.Tensor]:
         embeddings, input_point_cloud_mask, event_token = self.backbone(x, x_mask, globals)
-        return _apply_classification_head(self.Classification, embeddings, input_point_cloud_mask, event_token)
+        outputs = _apply_classification_heads(self.Classification, embeddings, input_point_cloud_mask, event_token)
+        return outputs if self.return_dict else outputs[DEFAULT_HEAD]
 
 
 class EveNetLite(nn.Module):
@@ -186,7 +214,7 @@ class EveNetLite(nn.Module):
         config: DotDict,
         global_input_dim: int,
         sequential_input_dim: int,
-        cls_label: List[str],
+        cls_label: List[str] | Mapping[str, Mapping[str, Any]],
         n_ensemble: int = 1,
         ensemble_mode: str = "independent",
         use_adapter: bool = False,
@@ -205,16 +233,18 @@ class EveNetLite(nn.Module):
         self.global_input_dim = global_input_dim
         self.sequential_input_dim = sequential_input_dim
 
-        self.class_label = {"EVENT": cls_label}
-        self.num_classes = {"EVENT": len(cls_label)}
+        self.head_class_labels, self.head_loss_weights, self.return_dict = normalize_class_heads(cls_label)
+        self.head_names = list(self.head_class_labels)
+        self.num_classes = {head: len(labels) for head, labels in self.head_class_labels.items()}
+        self.class_label = {DEFAULT_HEAD: self.head_class_labels[DEFAULT_HEAD]} if not self.return_dict else self.head_class_labels
 
         backbone_builder = lambda: EveNetBackbone(config, global_input_dim, sequential_input_dim, use_adapter=use_adapter)
         head_dim = config.Body.ObjectEncoder.hidden_dim
-        head_builder = lambda: _build_classification_head(config, self.class_label, self.num_classes, head_dim)
+        head_builder = lambda: _build_classification_heads(config, self.head_class_labels, head_dim)
 
         if self.ensemble_mode == "independent":
             self.models = nn.ModuleList(
-                _EveNetLiteSingle(backbone_builder(), head_builder()) for _ in range(self.n_ensemble)
+                _EveNetLiteSingle(backbone_builder(), head_builder(), self.return_dict) for _ in range(self.n_ensemble)
             )
             self.local_feature_indices = self.models[0].backbone.local_feature_indices
         else:
@@ -242,15 +272,35 @@ class EveNetLite(nn.Module):
             return self.backbone.ObjectEncoder
         return None
 
-    def forward(self, x: torch.Tensor, x_mask: torch.Tensor, globals: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_mask: torch.Tensor | None = None,
+        globals: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor | Dict[str, torch.Tensor]:
+        if x_mask is None:
+            if mask is None:
+                raise ValueError("EveNetLite.forward requires x_mask or mask")
+            x_mask = mask
+        if globals is None:
+            raise ValueError("EveNetLite.forward requires globals")
         if self.ensemble_mode == "independent":
             outputs = [model(x=x, x_mask=x_mask, globals=globals) for model in self.models]
         else:
             embeddings, input_point_cloud_mask, event_token = self.backbone(x, x_mask, globals)
             outputs = [
-                _apply_classification_head(head, embeddings, input_point_cloud_mask, event_token)
+                _apply_classification_heads(head, embeddings, input_point_cloud_mask, event_token)
                 for head in self.Classification
             ]
+
+        if self.return_dict:
+            if self.n_ensemble == 1:
+                return outputs[0]
+            return {
+                head: torch.stack([output[head] for output in outputs], dim=0)
+                for head in self.head_names
+            }
 
         if self.n_ensemble == 1:
             return outputs[0]
@@ -263,13 +313,25 @@ class EveNetLite(nn.Module):
             "GlobalEmbedding": 1,
             "PET": 1,
             "ObjectEncoder": 1,
-            "Classification": 1,
+            "Classification": len(self.head_names),
         }
         if self.ensemble_mode == "independent":
-            return {name: self.n_ensemble for name in base}
+            return {
+                name: count * self.n_ensemble
+                for name, count in base.items()
+            }
 
-        base["Classification"] = self.n_ensemble
+        base["Classification"] = self.n_ensemble * len(self.head_names)
         return base
+
+    def _expand_classification_remainders(self, remainder: str) -> List[str]:
+        if not self.return_dict:
+            first = remainder.split(".", 1)[0]
+            return [remainder] if first == DEFAULT_HEAD else [f"{DEFAULT_HEAD}.{remainder}"]
+        first = remainder.split(".", 1)[0]
+        if first in self.head_names:
+            return [remainder]
+        return [f"{head}.{remainder}" for head in self.head_names]
 
     def _log_ensemble_structure(self) -> None:
         if self.n_ensemble <= 1:
@@ -294,31 +356,34 @@ class EveNetLite(nn.Module):
             logger.info("Shared components: %s", ", ".join(shared))
 
     def _expand_independent(self, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        if any(key.startswith("models.") for key in state):
-            return state
-
         expanded: Dict[str, torch.Tensor] = {}
-        for idx in range(self.n_ensemble):
-            for key, value in state.items():
-                base_key = key
-                if base_key.startswith("backbone."):
-                    base_key = base_key[len("backbone.") :]
-                if base_key.startswith("Classification"):
-                    expanded[f"models.{idx}.{base_key}"] = value
+        for key, value in state.items():
+            tokens = key.split(".", 2)
+            if len(tokens) >= 3 and tokens[0] == "models" and tokens[1].isdigit():
+                idx, rest = tokens[1], tokens[2]
+                if rest.startswith("Classification."):
+                    remainder = rest[len("Classification.") :]
+                    for expanded_remainder in self._expand_classification_remainders(remainder):
+                        expanded[f"models.{idx}.Classification.{expanded_remainder}"] = value
+                else:
+                    expanded[key] = value
+                continue
+
+            base_key = key[len("backbone.") :] if key.startswith("backbone.") else key
+            for idx in range(self.n_ensemble):
+                if base_key.startswith("Classification."):
+                    remainder = base_key[len("Classification.") :]
+                    for expanded_remainder in self._expand_classification_remainders(remainder):
+                        expanded[f"models.{idx}.Classification.{expanded_remainder}"] = value
+                elif base_key.startswith("Classification"):
+                    suffix = base_key[len("Classification") :].lstrip(".")
+                    for expanded_remainder in self._expand_classification_remainders(suffix):
+                        expanded[f"models.{idx}.Classification.{expanded_remainder}"] = value
                 else:
                     expanded[f"models.{idx}.backbone.{base_key}"] = value
         return expanded
 
     def _expand_shared(self, state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        has_backbone_prefix = any(key.startswith("backbone.") for key in state)
-        has_indexed_classification = any(
-            key.startswith("Classification.")
-            and key[len("Classification.") :].split(".", 1)[0].isdigit()
-            for key in state
-        )
-        if has_backbone_prefix and has_indexed_classification:
-            return state
-
         expanded: Dict[str, torch.Tensor] = {}
         for key, value in state.items():
             base_key = key
@@ -329,14 +394,18 @@ class EveNetLite(nn.Module):
                 remainder = base_key[len("Classification.") :]
                 first_token = remainder.split(".", 1)[0]
                 if first_token.isdigit():
-                    expanded[f"Classification.{remainder}"] = value
+                    idx, sub_remainder = remainder.split(".", 1)
+                    for expanded_remainder in self._expand_classification_remainders(sub_remainder):
+                        expanded[f"Classification.{idx}.{expanded_remainder}"] = value
                 else:
                     for idx in range(self.n_ensemble):
-                        expanded[f"Classification.{idx}.{remainder}"] = value
+                        for expanded_remainder in self._expand_classification_remainders(remainder):
+                            expanded[f"Classification.{idx}.{expanded_remainder}"] = value
             elif base_key.startswith("Classification"):
-                suffix = base_key[len("Classification") :]
+                suffix = base_key[len("Classification") :].lstrip(".")
                 for idx in range(self.n_ensemble):
-                    expanded[f"Classification.{idx}{suffix}"] = value
+                    for expanded_remainder in self._expand_classification_remainders(suffix):
+                        expanded[f"Classification.{idx}.{expanded_remainder}"] = value
             elif base_key:
                 expanded[f"backbone.{base_key}"] = value
 

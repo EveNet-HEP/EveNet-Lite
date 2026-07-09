@@ -28,12 +28,12 @@ def _configure_logging(log_level: int) -> None:
 
 def run_evenet_lite_training(
     train_features: Dict[str, torch.Tensor],
-    train_labels: torch.Tensor,
+    train_labels: Any,
     train_weights: Optional[torch.Tensor] = None,
     *,
-    class_labels: List[str],
+    class_labels: Any,
     val_features: Optional[Dict[str, torch.Tensor]] = None,
-    val_labels: Optional[torch.Tensor] = None,
+    val_labels: Optional[Any] = None,
     val_weights: Optional[torch.Tensor] = None,
     feature_names: Optional[Dict[str, Iterable[str]]] = None,
     normalization_rules: Optional[Dict[str, Dict[str, str]]] = None,
@@ -53,15 +53,15 @@ def run_evenet_lite_training(
     early_stop_minimize: bool = True,
     early_stop_patience: int = 0,
     eval_features: Optional[Dict[str, torch.Tensor]] = None,
-    eval_labels: Optional[torch.Tensor] = None,
+    eval_labels: Optional[Any] = None,
     eval_weights: Optional[torch.Tensor] = None,
     eval_output_path: Optional[str] = None,
     eval_batch_size: Optional[int] = None,
     physics_metric_config: Optional[Dict[str, Any]] = None,
-    classification_score_bins: int = 100,
     debug: bool = False,
     log_level: int = logging.INFO,
-    loss_gamma: float = 0.0,
+    loss_gamma: Any = 0.0,
+    ignore_index: int = -100,
     **classifier_kwargs: Any,
 ) -> EvenetLiteClassifier:
     """Convenience entrypoint for running Evenet-Lite training on prepared tensors.
@@ -74,9 +74,9 @@ def run_evenet_lite_training(
     Args:
         train_features: Mapping of feature group name to tensor with shape
             matching the model contract (e.g., ``{"objects": Tensor[N, M, F]}``).
-        train_labels: Class indices for each training example.
+        train_labels: Class indices for each training example, or ``head -> labels`` for multi-head training.
         train_weights: Optional per-example weights aligned with ``train_labels``.
-        class_labels: Ordered list of class names passed to
+        class_labels: Ordered class names or a multi-head dictionary passed to
             :class:`EvenetLiteClassifier`.
         val_features: Optional validation features following the same structure
             as ``train_features``.
@@ -102,7 +102,8 @@ def run_evenet_lite_training(
             metric.
         monitor_metric: Metric name used for checkpoint ranking.
         minimize_metric: Whether ``monitor_metric`` should be minimized.
-        loss_gamma: Focal-loss gamma parameter (``0`` reduces to standard cross-entropy).
+        loss_gamma: Focal-loss gamma parameter, or ``head -> gamma`` for multi-head training.
+        ignore_index: Label value skipped per head during validation, loss, metrics, plots, and physics metrics.
         debug: Whether to enable verbose ``DebugCallback`` logging.
         log_level: Logging level applied before runner diagnostics and forwarded
             to the classifier when unspecified.
@@ -123,7 +124,12 @@ def run_evenet_lite_training(
     if "log_level" not in classifier_kwargs:
         classifier_kwargs["log_level"] = log_level
 
-    classifier = EvenetLiteClassifier(class_labels=class_labels, loss_gamma=loss_gamma, **classifier_kwargs)
+    classifier = EvenetLiteClassifier(
+        class_labels=class_labels,
+        loss_gamma=loss_gamma,
+        ignore_index=ignore_index,
+        **classifier_kwargs,
+    )
 
     train_payload = (train_features, train_labels, train_weights)
     val_payload = None
@@ -154,7 +160,6 @@ def run_evenet_lite_training(
         eval_output_path=eval_output_path,
         eval_batch_size=eval_batch_size,
         physics_metric_config=physics_metric_config,
-        classification_score_bins=classification_score_bins,
         debug=debug,
     )
     return classifier

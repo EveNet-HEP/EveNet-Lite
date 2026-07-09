@@ -1,10 +1,12 @@
-from typing import Dict, Iterator, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset, Sampler
 import torch.distributed as dist
 
 from .callbacks import EvenetLiteNormalizer
+from .heads import DEFAULT_HEAD
 
 
 class EvenetTensorDataset(Dataset):
@@ -12,7 +14,7 @@ class EvenetTensorDataset(Dataset):
 
     Args:
         features: Mapping of feature group name to tensor with leading batch dimension.
-        labels: Target labels tensor.
+        labels: Target labels tensor, or ``head -> labels`` for multi-head classifiers.
         sample_weights: Optional per-sample weights tensor.
         normalizer: Normalizer applied on-the-fly when retrieving items.
     """
@@ -20,7 +22,7 @@ class EvenetTensorDataset(Dataset):
     def __init__(
             self,
             features: Dict[str, torch.Tensor],
-            labels: torch.Tensor,
+            labels: torch.Tensor | Mapping[str, torch.Tensor],
             sample_weights: Optional[torch.Tensor] = None,
             normalizer: Optional[EvenetLiteNormalizer] = None,
             include_indices: bool = False,
@@ -32,7 +34,12 @@ class EvenetTensorDataset(Dataset):
                 tensor = tensor.to(dtype=torch.float32)
             self.raw_features[name] = tensor
 
-        self.labels = torch.as_tensor(labels).long()
+        if isinstance(labels, Mapping):
+            if not labels:
+                raise ValueError("labels dictionary must not be empty")
+            self.labels = {head: torch.as_tensor(value).long() for head, value in labels.items()}
+        else:
+            self.labels = torch.as_tensor(labels).long()
         self.sample_weights = (
             torch.as_tensor(sample_weights, dtype=torch.float32) if sample_weights is not None else None
         )
@@ -41,7 +48,33 @@ class EvenetTensorDataset(Dataset):
 
         self.features: Dict[str, torch.Tensor] = {}
         self._prepared_normalizer: Optional[EvenetLiteNormalizer] = None
+        self._length = self._validate_lengths()
         self._prepare_features()
+
+    @property
+    def label_heads(self) -> list[str]:
+        return list(self.labels.keys()) if isinstance(self.labels, dict) else [DEFAULT_HEAD]
+
+    def labels_for(self, head: Optional[str] = None) -> torch.Tensor:
+        if isinstance(self.labels, dict):
+            resolved = head if head is not None else self.label_heads[0]
+            return self.labels[resolved]
+        return self.labels
+
+    def _validate_lengths(self) -> int:
+        label_tensors = self.labels.values() if isinstance(self.labels, dict) else [self.labels]
+        lengths = {int(tensor.shape[0]) for tensor in label_tensors}
+        if len(lengths) != 1:
+            raise ValueError("all label tensors must have the same leading dimension")
+        length = lengths.pop()
+
+        if self.sample_weights is not None and self.sample_weights.shape[0] != length:
+            raise ValueError("sample_weights length must match labels")
+
+        for name, tensor in self.raw_features.items():
+            if tensor.shape[0] != length:
+                raise ValueError(f"feature {name!r} length {tensor.shape[0]} does not match labels length {length}")
+        return length
 
     def set_normalizer(self, normalizer: EvenetLiteNormalizer) -> None:
         if normalizer is self._prepared_normalizer:
@@ -67,11 +100,11 @@ class EvenetTensorDataset(Dataset):
         self._prepared_normalizer = self.normalizer
 
     def __len__(self) -> int:
-        return self.labels.shape[0]
+        return self._length
 
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]:
         features = {k: v[idx] for k, v in self.features.items()}
-        label = self.labels[idx]
+        label = {head: value[idx] for head, value in self.labels.items()} if isinstance(self.labels, dict) else self.labels[idx]
         weight = self.sample_weights[idx] if self.sample_weights is not None else torch.tensor(1.0, dtype=torch.float32)
         if self.include_indices:
             return features, label, weight, torch.tensor(idx, dtype=torch.long)
@@ -131,8 +164,10 @@ def build_sampler(
         epoch_size: Optional[int] = None,
 ) -> Optional[Sampler[int]]:
     if sampler == "weighted":
-        labels = dataset.labels.long()
         if weights is None:
+            if isinstance(dataset.labels, dict):
+                raise ValueError("weighted sampler with multi-head labels requires explicit sample weights")
+            labels = dataset.labels.long()
             # derive weights from labels
             class_counts = torch.bincount(labels.long())
             class_weights = class_counts.float().reciprocal().clamp_max(class_counts.numel())

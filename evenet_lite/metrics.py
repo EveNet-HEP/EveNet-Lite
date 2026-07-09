@@ -11,6 +11,11 @@ from scipy.special import expit, softmax
 from .transform_binning import binned_sig
 
 
+def integrate_trapezoid(y: np.ndarray, x: np.ndarray) -> float:
+    fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    return float(fn(y, x))
+
+
 def _flatten_ensemble(
         logits: torch.Tensor, targets: torch.Tensor, weights: Optional[torch.Tensor]
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -43,8 +48,16 @@ def compute_loss(
         weights: Optional[torch.Tensor],
         gamma: float = 1.0,
         eps: float = 1e-8,
+        ignore_index: int = -100,
 ) -> torch.Tensor:
     logits, targets, weights = _flatten_ensemble(logits, targets, weights)
+    valid = targets != ignore_index
+    if not torch.any(valid):
+        return logits.sum() * 0.0
+    logits = logits[valid]
+    targets = targets[valid]
+    if weights is not None:
+        weights = weights[valid]
 
     # Standard CE per sample
     ce = F.cross_entropy(logits, targets, reduction="none")
@@ -59,13 +72,21 @@ def compute_loss(
 
     if weights is not None:
         weights = weights.to(per_sample.device)
-        return torch.sum(per_sample * weights) / torch.sum(weights)
+        weight_sum = torch.sum(weights)
+        if weight_sum <= 0:
+            return per_sample.sum() * 0.0
+        return torch.sum(per_sample * weights) / weight_sum
 
     return per_sample.mean()
 
 
-def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
+def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100) -> float:
     logits = _mean_ensemble_logits(logits)
+    valid = targets != ignore_index
+    if not torch.any(valid):
+        return 0.0
+    logits = logits[valid]
+    targets = targets[valid]
     preds = logits.argmax(dim=1)
     correct = (preds == targets).sum().item()
     return correct / max(1, targets.numel())
@@ -158,7 +179,7 @@ def classification_auc_from_score_histograms(score_histograms: np.ndarray) -> np
             continue
         sig_eff = np.concatenate(([0.0], np.cumsum(sig_hist[::-1]) / total_sig))
         bkg_eff = np.concatenate(([0.0], np.cumsum(bkg_hist[::-1]) / total_bkg))
-        class_auc[cls] = float(np.trapz(sig_eff, bkg_eff))
+        class_auc[cls] = integrate_trapezoid(sig_eff, bkg_eff)
     return class_auc
 
 
@@ -175,10 +196,10 @@ def compute_classification_metrics(
     num_classes = max(num_classes, probs.shape[1], int(targets.max() + 1) if targets.size else 0)
     weights = _weights_or_ones(targets, weights)
 
-    valid = (targets >= 0) & (targets < num_classes) & (weights >= 0)
-    targets = targets[valid]
-    probs = probs[valid]
-    weights = weights[valid]
+    valid_mask = (targets >= 0) & (targets < num_classes) & (weights >= 0)
+    targets = targets[valid_mask]
+    probs = probs[valid_mask]
+    weights = weights[valid_mask]
 
     matrix = np.zeros((num_classes, num_classes), dtype=float)
     entries_matrix = np.zeros((num_classes, num_classes), dtype=float)
@@ -210,6 +231,9 @@ def compute_classification_metrics(
         if np.any(finite_auc) and support[finite_auc].sum() > 0 else 0.5,
         "class_auc": class_auc,
         "probabilities": probs,
+        "targets": targets,
+        "weights": weights,
+        "valid_mask": valid_mask,
     })
     return summary
 
@@ -259,7 +283,7 @@ def weighted_roc_curve(
     fpr_interp = np.interp(tpr_uniform, fpr_raw, fpr_clipped)
     sigma_fpr_interp = np.interp(tpr_uniform, tpr_raw, sigma_fpr_raw)
 
-    auc = np.trapz(tpr_raw, fpr_raw)
+    auc = integrate_trapezoid(tpr_raw, fpr_raw)
     return auc, fpr_interp, tpr_uniform, sigma_fpr_interp
 
 

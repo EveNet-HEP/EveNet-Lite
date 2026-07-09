@@ -40,7 +40,7 @@ classifier = run_evenet_lite_training(
 )
 
 # The returned classifier is already fitted and carries the trained normalizer.
-probs = classifier.predict({"x": X_infer, "globals": G_infer, "mask": M_infer})
+logits = classifier.predict({"x": X_infer, "globals": G_infer, "mask": M_infer})
 metrics = classifier.evaluate({"x": X_eval, "globals": G_eval, "mask": M_eval}, y_eval)
 classifier.save_checkpoint("./checkpoints/final.pt")
 ```
@@ -121,7 +121,7 @@ clf.fit(
 
 # Evaluate / predict
 val_metrics = clf.evaluate({"x": X_val, "globals": G_val, "mask": M_val}, y_val, w_val)
-probs = clf.predict({"x": X_test, "globals": G_test, "mask": M_test})
+logits = clf.predict({"x": X_test, "globals": G_test, "mask": M_test})
 
 # Checkpointing
 clf.save_checkpoint("./checkpoints/latest.pt")
@@ -148,6 +148,40 @@ weights = torch.Tensor[N] | None  # optional per-example weights
 Feature names passed to `fit` (`feature_names={"x": [...], "globals": [...]}`) should align with the keys above so the
 normalizer can match statistics to columns.
 
+## Multiple classification heads
+
+Pass `class_labels` as an explicit head dictionary when one backbone should train multiple classification heads:
+
+```python
+class_labels = {
+    "cls1": {"name": ["a", "b", "c"], "lambda": 1.0},
+    "cls2": {"name": ["a", "c"], "lambda": 0.5},
+}
+train_labels = {
+    "cls1": y_train_cls1,
+    "cls2": y_train_cls2,
+}
+# Use -100 for rows that should not train or score a given head.
+train_labels["cls1"][cls2_only_rows] = -100
+
+clf = EvenetLiteClassifier(
+    class_labels=class_labels,
+    loss_gamma={"cls1": 0.0, "cls2": 2.0},
+    ignore_index=-100,
+)
+clf.fit(
+    train_data=(train_features, train_labels, train_weights),
+    val_data=(val_features, {"cls1": y_val_cls1, "cls2": y_val_cls2}, val_weights),
+    physics_metric_config={"cls1": {"SIC_base": ["a"]}, "cls2": {}},
+)
+```
+
+All multi-head dictionaries must use the same head names. `train_labels`, `val_labels`, `eval_labels`,
+`loss_gamma`, and non-empty `physics_metric_config` are validated against `class_labels` and abort on mismatch.
+Labels equal to `ignore_index` are skipped per head in validation, loss, metrics, plots, and physics metrics.
+Metrics and W&B logs are prefixed by head name, e.g. `cls1/accuracy` and `cls2/metric-AUC/val_weighted`.
+Legacy list `class_labels` keeps the previous single-head behavior.
+
 ## Argument reference
 
 The tables below summarize the most-used entrypoints and their arguments. Defaults match the inline values in code.
@@ -156,7 +190,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 
 | Argument                                                                                  | Default                | Description                                                                                    |
 |-------------------------------------------------------------------------------------------|------------------------|------------------------------------------------------------------------------------------------|
-| `class_labels`                                                                            | **required**           | Ordered class names wired into metrics and loss.                                               |
+| `class_labels`                                                                            | **required**           | Ordered class names, or a head dictionary `head -> {"name": [...], "lambda": weight}`.          |
 | `device`                                                                                  | `"auto"`               | Chooses CUDA when available; otherwise CPU.                                                    |
 | `lr`                                                                                      | `[1e-3, 3e-4, 1e-4]`   | Learning rates assigned per optimizer group.                                                   |
 | `weight_decay`                                                                            | `[0.01, 0.01, 0.01]`   | Weight decay values aligned with the learning-rate groups.                                     |
@@ -173,7 +207,8 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `pretrained_source`                                                                       | `"hf"`                 | `"hf"` for Hugging Face hub or `"local"` for a provided path.                                  |
 | `pretrained_path` / `pretrained_repo_id` / `pretrained_filename` / `pretrained_cache_dir` | varies                 | Location details for pretrained checkpoints.                                                   |
 | `num_workers`                                                                             | 0                      | Number of processes passing to pytorch `DataLoader`                                              |
-| `loss_gamma`                                                                              | `0.0`                  | Focal-loss gamma (``0`` reduces to standard cross-entropy).                                    |
+| `loss_gamma`                                                                              | `0.0`                  | Focal-loss gamma; use `head -> gamma` when `class_labels` is a multi-head dictionary.           |
+| `ignore_index`                                                                            | `-100`                 | Label value skipped per head during validation, loss, metrics, plots, and physics metrics.       |
 
 ### `EvenetLiteClassifier.fit`
 
@@ -197,14 +232,13 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `eval_data`                                                         | `None`                         | Optional test tuple evaluated after training.                            |
 | `eval_output_path`                                                  | `None`                         | Path to save evaluation outputs when provided.                           |
 | `eval_batch_size`                                                   | `None`                         | Batch size for evaluation (falls back to training batch size).           |
-| `physics_metric_config`                                             | `None`                         | Optional `calculate_physics_metrics` keyword overrides; `SIC_base` enables multiclass signal-vs-background SIC. |
-| `classification_score_bins`                                         | `100`                          | Score histogram bins for train/validation multiclass AUC and plots.      |
+| `physics_metric_config`                                             | `None`                         | Optional `calculate_physics_metrics` keyword overrides; use `head -> config` for multi-head runs. |
 | `debug`                                                             | `False`                        | Enables verbose `DebugCallback` logging and diagnostics.                 |
 
 ### `EvenetLiteClassifier.predict` / `evaluate`
 
-- `predict(features, batch_size=256)`: returns class probabilities using the stored normalizer; requires that `fit` or
-  `load_checkpoint` has been called.
+- `predict(features, batch_size=256)`: returns logits using the stored normalizer, or a `head -> tensor`
+  dictionary for multi-head classifiers; requires that `fit` or `load_checkpoint` has been called.
 - `evaluate(features, labels, weights=None, batch_size=256)`: computes weighted classification metrics, with binary
   physics metrics added only for two-class tasks.
 
@@ -213,7 +247,7 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | Argument                                                            | Default                              | Description                                                        |
 |---------------------------------------------------------------------|--------------------------------------|--------------------------------------------------------------------|
 | `train_features` / `train_labels` / `train_weights`                 | **required** / **required** / `None` | Training tensors and optional weights.                             |
-| `class_labels`                                                      | **required**                         | Ordered class names passed to the classifier.                      |
+| `class_labels`                                                      | **required**                         | Ordered class names or a multi-head dictionary passed to the classifier. |
 | `val_features` / `val_labels` / `val_weights`                       | `None`                               | Optional validation tensors and weights.                           |
 | `feature_names`                                                     | `None`                               | Feature column names forwarded to the classifier.                  |
 | `normalization_rules`                                               | `None`                               | Per-feature normalization overrides.                               |
@@ -229,10 +263,10 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 | `eval_features` / `eval_labels` / `eval_weights`                    | `None`                               | Optional evaluation payload run after training.                    |
 | `eval_output_path`                                                  | `None`                               | File path to persist evaluation results.                           |
 | `eval_batch_size`                                                   | `None`                               | Batch size for evaluation (defaults to training batch size).       |
-| `physics_metric_config`                                             | `None`                               | Optional `calculate_physics_metrics` keyword overrides; `SIC_base` enables multiclass signal-vs-background SIC. |
-| `classification_score_bins`                                         | `100`                                | Score histogram bins for train/validation multiclass AUC and plots. |
+| `physics_metric_config`                                             | `None`                               | Optional `calculate_physics_metrics` keyword overrides; use `head -> config` for multi-head runs. |
 | `debug`                                                             | `False`                              | Enables verbose debugging callback and sampler diagnostics.        |
-| `loss_gamma`                                                        | `0.0`                                | Focal-loss gamma (``0`` reduces to standard cross-entropy).        |
+| `loss_gamma`                                                        | `0.0`                                | Focal-loss gamma; use `head -> gamma` for multi-head runs.         |
+| `ignore_index`                                                      | `-100`                               | Label value skipped per head during validation, loss, metrics, plots, and physics metrics. |
 | `log_level`                                                         | `logging.INFO`                       | Logging level set before runner diagnostics.                       |
 | `**classifier_kwargs`                                               | —                                    | Additional arguments forwarded directly to `EvenetLiteClassifier`. |
 

@@ -13,6 +13,7 @@ from evenet.control.global_config import DotDict
 from .callbacks import Callback, EvenetLiteNormalizer, NormalizationCallback
 from .data import EvenetTensorDataset
 from .hf_utils import load_pretrained_weights
+from .heads import normalize_class_heads
 from .model import EveNetLite
 from .optim import DEFAULT_HEAD_LR, DEFAULT_MODULE_GROUPS, DEFAULT_WEIGHT_DECAY
 from .trainer import Trainer, TrainerConfig
@@ -74,7 +75,7 @@ class EvenetLiteClassifier:
 
     def __init__(
             self,
-            class_labels: List[str],
+            class_labels: Any,
             device: str = "auto",
             lr: List[float] | float = DEFAULT_HEAD_LR,
             weight_decay: List[float] | float = DEFAULT_WEIGHT_DECAY,
@@ -101,7 +102,8 @@ class EvenetLiteClassifier:
             num_workers: int = 0,
             n_ensemble: int = 1,
             ensemble_mode: str = "independent",
-            loss_gamma: float = 0.0,
+            loss_gamma: Any = 0.0,
+            ignore_index: int = -100,
             use_adapter: bool = False,
             use_peft: bool = False,
     ) -> None:
@@ -114,6 +116,7 @@ class EvenetLiteClassifier:
                 handler.setFormatter(logging.Formatter(log_format))
                 handler.setLevel(log_level)
         root_logger.setLevel(log_level)
+        self.head_class_labels, _head_loss_weights, self.multi_head = normalize_class_heads(class_labels)
         if model is None:
             default_config = Path(__file__).parent / 'config' / 'default_network_config.yaml'
             with open(str(default_config), 'r') as f:
@@ -160,6 +163,7 @@ class EvenetLiteClassifier:
             wandb=wandb,
             num_workers=num_workers,
             loss_gamma=loss_gamma,
+            ignore_index=ignore_index,
             use_peft=use_peft,
         )
         self.trainer: Optional[Trainer] = None
@@ -169,8 +173,8 @@ class EvenetLiteClassifier:
 
     def fit(
             self,
-            train_data: Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]],
-            val_data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]] = None,
+            train_data: Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]],
+            val_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]] = None,
             train_params: Optional[torch.Tensor] = None,
             val_params: Optional[torch.Tensor] = None,
             feature_names: Optional[Dict[str, Iterable[str]]] = None,
@@ -190,12 +194,11 @@ class EvenetLiteClassifier:
             early_stop_metric: str = "val_loss",
             early_stop_patience: int = 0,
             early_stop_minimize: bool = True,
-            eval_data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]] = None,
+            eval_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]] = None,
             eval_params: Optional[torch.Tensor] = None,
             eval_output_path: Optional[str] = None,
             eval_batch_size: Optional[int] = None,
             physics_metric_config: Optional[Dict[str, Any]] = None,
-            classification_score_bins: int = 100,
             debug: bool = False,
     ) -> None:
         if feature_names is None:
@@ -239,13 +242,12 @@ class EvenetLiteClassifier:
         self.config.early_stop_minimize = early_stop_minimize
         self.config.eval_output_path = eval_output_path
         self.config.eval_batch_size = eval_batch_size
-        self.config.physics_metric_config = dict(physics_metric_config or {})
-        self.config.classification_score_bins = classification_score_bins
+        self.config.physics_metric_config = physics_metric_config or {}
 
         def _attach_params(
-            data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]],
+            data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]],
             params: Optional[torch.Tensor],
-        ) -> Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]]:
+        ) -> Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]]:
             if data is None or params is None:
                 return data
             features, labels, weights = data
@@ -265,16 +267,22 @@ class EvenetLiteClassifier:
         norm_callback = next(cb for cb in self.trainer.callbacks if isinstance(cb, NormalizationCallback))
         self.normalizer = norm_callback.normalizer
 
-    def predict(self, X: Dict[str, torch.Tensor], batch_size: int = 256) -> torch.Tensor:
+    def predict(self, X: Dict[str, torch.Tensor], batch_size: int = 256) -> Any:
         if self.trainer is None:
             raise RuntimeError("Model must be fitted before predicting")
-        dataset = EvenetTensorDataset(X, torch.zeros(len(next(iter(X.values())))), None, self.normalizer)
+        n = len(next(iter(X.values())))
+        dummy_labels = (
+            {head: torch.zeros(n, dtype=torch.long) for head in self.head_class_labels}
+            if self.multi_head
+            else torch.zeros(n, dtype=torch.long)
+        )
+        dataset = EvenetTensorDataset(X, dummy_labels, None, self.normalizer)
         return self.trainer.predict(dataset, batch_size)
 
     def evaluate(
             self,
             X: Dict[str, torch.Tensor],
-            y: torch.Tensor,
+            y: Any,
             weights: Optional[torch.Tensor] = None,
             batch_size: int = 256,
     ) -> Dict[str, float]:
