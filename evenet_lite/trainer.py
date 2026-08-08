@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from .callbacks import Callback, NormalizationCallback, DebugCallback
-from .data import EvenetTensorDataset, build_sampler, DistributedWeightedSampler
+from .data import EvenetTensorDataset, SampleWeights, build_sampler, DistributedWeightedSampler
 from .heads import DEFAULT_HEAD, format_head_keys, normalize_class_heads, normalize_head_config, normalize_head_tensors
 from .checkpoint import load_checkpoint, save_checkpoint
 from .metrics import (
@@ -379,6 +379,46 @@ class Trainer:
             return {head: value[indices] for head, value in targets.items()}
         return targets[indices]
 
+    def _subset_weights(self, weights: Optional[SampleWeights], indices: torch.Tensor) -> Optional[SampleWeights]:
+        if weights is None or indices.numel() == 0:
+            return weights
+        if isinstance(weights, Mapping):
+            return {head: value[indices] for head, value in weights.items()}
+        return weights[indices]
+
+    def _weights_by_head(
+            self,
+            weights: Any,
+            targets_by_head: Dict[str, torch.Tensor],
+            what: str,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        """Normalize shared or per-head weights and validate their batched shape."""
+
+        if isinstance(weights, Mapping):
+            keys = set(weights)
+            expected = set(self.head_names)
+            if keys != expected:
+                raise ValueError(
+                    f"{what} heads {format_head_keys(keys)} do not match class_labels heads {format_head_keys(expected)}"
+                )
+            resolved: Dict[str, Optional[torch.Tensor]] = {
+                head: torch.as_tensor(weights[head], dtype=torch.float32, device=self.device)
+                for head in self.head_names
+            }
+        elif weights is None:
+            resolved = {head: None for head in self.head_names}
+        else:
+            shared = torch.as_tensor(weights, dtype=torch.float32, device=self.device)
+            resolved = {head: shared for head in self.head_names}
+
+        for head, weight in resolved.items():
+            if weight is not None and (weight.dim() != 1 or weight.shape[0] != targets_by_head[head].shape[0]):
+                actual = tuple(weight.shape) if weight is not None else None
+                raise ValueError(
+                    f"{what}[{head!r}] must have shape [{targets_by_head[head].shape[0]}], got {actual}"
+                )
+        return resolved
+
     def _validate_model_head_dimensions(self) -> None:
         model_classes = getattr(self._unwrap_model(), "num_classes", None)
         if model_classes is None:
@@ -436,9 +476,9 @@ class Trainer:
 
     def setup_datasets(
             self,
-            train_data: Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]],
-            val_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]],
-            test_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]],
+            train_data: Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]],
+            val_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]]],
+            test_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]]],
     ) -> None:
         X_train, y_train, w_train = train_data
         self.train_dataset = EvenetTensorDataset(X_train, y_train, w_train)
@@ -508,10 +548,11 @@ class Trainer:
         labels = labels[valid_labels]
         counts = torch.bincount(labels, minlength=num_classes)
 
-        if dataset.sample_weights is None:
+        head_weights = dataset.weights_for(head)
+        if head_weights is None:
             weights = torch.ones_like(labels, dtype=torch.float32)
         else:
-            weights = torch.as_tensor(dataset.sample_weights, dtype=torch.float32)[valid_labels]
+            weights = torch.as_tensor(head_weights, dtype=torch.float32)[valid_labels]
             finite_mask = torch.isfinite(weights)
             weights = torch.where(finite_mask, weights, torch.zeros_like(weights))
 
@@ -590,9 +631,9 @@ class Trainer:
 
     def train(
             self,
-            train_data: Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]],
-            val_data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]],
-            test_data: Optional[Tuple[Dict[str, torch.Tensor], torch.Tensor, Optional[torch.Tensor]]],
+            train_data: Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]],
+            val_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]]],
+            test_data: Optional[Tuple[Dict[str, torch.Tensor], Any, Optional[SampleWeights]]],
             epochs: int,
             batch_size: int,
             sampler: Optional[str],
@@ -1113,14 +1154,22 @@ class Trainer:
                 for head, target in self._targets_by_head(batch_payload["targets"], "batch labels").items()
             }
             weights = batch_payload["weights"]
-            weight_tensor: Optional[torch.Tensor] = None
-            if weights is not None:
-                weights = weights.to(self.device)
-                finite_mask = torch.isfinite(weights)
-                # Zero-out any non-finite weights to avoid NaNs in the loss
-                weight_tensor = torch.where(finite_mask, weights, torch.zeros_like(weights))
+            weights_by_head = self._weights_by_head(weights, targets_by_head, "batch weights")
+            sanitized_weights_by_head: Dict[str, Optional[torch.Tensor]] = {}
+            for head, head_weights in weights_by_head.items():
+                if head_weights is None:
+                    sanitized_weights_by_head[head] = None
+                    continue
+                finite_mask = torch.isfinite(head_weights)
+                # Zero-out any non-finite weights to avoid NaNs in loss or metrics.
+                sanitized_weights_by_head[head] = torch.where(
+                    finite_mask, head_weights, torch.zeros_like(head_weights)
+                )
                 if not torch.all(finite_mask):
-                    logging.debug("Non-finite weights detected; treating them as zero during loss computation.")
+                    logging.debug(
+                        "Non-finite weights detected for head %s; treating them as zero during loss computation.",
+                        head,
+                    )
             with torch.set_grad_enabled(training):
                 outputs_by_head = self._outputs_by_head(self._forward(model, features))
                 self._validate_batch_outputs(outputs_by_head, targets_by_head)
@@ -1135,21 +1184,19 @@ class Trainer:
                         )
 
                 weighted_sampler = isinstance(loader.sampler, DistributedWeightedSampler)
-                first_targets = next(iter(targets_by_head.values()))
-                base_weight_tensor = (
-                    weight_tensor
-                    if weight_tensor is not None
-                    else torch.ones_like(first_targets, dtype=torch.float32, device=self.device)
-                )
-                weight_tensor_input = torch.ones_like(base_weight_tensor) if weighted_sampler else base_weight_tensor
 
                 head_losses: Dict[str, torch.Tensor] = {}
                 loss = torch.zeros((), dtype=torch.float32, device=self.device)
                 for head in self.head_names:
+                    head_weight_tensor = sanitized_weights_by_head[head]
+                    if weighted_sampler:
+                        head_weight_tensor = torch.ones_like(
+                            targets_by_head[head], dtype=torch.float32, device=self.device
+                        )
                     head_loss = compute_loss(
                         outputs_by_head[head],
                         targets_by_head[head],
-                        weight_tensor_input,
+                        head_weight_tensor,
                         gamma=self.head_loss_gamma[head],
                         ignore_index=self.ignore_index,
                     )
@@ -1208,8 +1255,8 @@ class Trainer:
                 batch_metrics[acc_key] = batch_accuracy
 
                 metric_weights = (
-                    weight_tensor.detach()
-                    if weight_tensor is not None
+                    sanitized_weights_by_head[head].detach()
+                    if sanitized_weights_by_head[head] is not None
                     else torch.ones_like(targets, dtype=torch.float32, device=self.device)
                 )
                 valid = (
@@ -2068,23 +2115,18 @@ class Trainer:
             return {}
 
         labels = self._subset_targets(dataset.labels, indices)
-        weights = dataset.sample_weights[
-            indices] if dataset.sample_weights is not None and indices.numel() > 0 else dataset.sample_weights
+        weights = self._subset_weights(dataset.sample_weights, indices)
         raw_features = (
             {name: tensor[indices] for name, tensor in dataset.raw_features.items()}
             if indices.numel() > 0
             else dataset.raw_features
         )
 
-        valid_weight_tensor = None
-        if weights is not None:
-            finite_mask = torch.isfinite(weights)
-            valid_weight_tensor = weights if torch.all(finite_mask) else None
-
         resolved_base = self._resolve_eval_base_path(Path(output_path)) if output_path else None
         preds_by_head = self._outputs_by_head(preds)
         labels_by_head = self._targets_by_head(labels, "eval labels")
         self._validate_batch_outputs(preds_by_head, labels_by_head)
+        weights_by_head = self._weights_by_head(weights, labels_by_head, "eval weights")
 
         metrics: Dict[str, Any] = {}
         total_loss = 0.0
@@ -2094,10 +2136,15 @@ class Trainer:
         for head in self.head_names:
             head_preds = preds_by_head[head]
             head_labels = labels_by_head[head]
+            head_weights = weights_by_head[head]
+            if head_weights is not None:
+                head_weights = torch.where(
+                    torch.isfinite(head_weights), head_weights, torch.zeros_like(head_weights)
+                )
             head_loss = compute_loss(
                 head_preds,
                 head_labels,
-                valid_weight_tensor,
+                head_weights,
                 gamma=self.head_loss_gamma[head],
                 ignore_index=self.ignore_index,
             )
@@ -2107,8 +2154,8 @@ class Trainer:
                 "accuracy": float(compute_accuracy(head_preds, head_labels, ignore_index=self.ignore_index)),
             }
             weights_np = (
-                weights.numpy()
-                if weights is not None
+                head_weights.cpu().numpy()
+                if head_weights is not None
                 else torch.ones_like(head_labels, dtype=torch.float32).numpy()
             )
             preds_np = head_preds.numpy()
@@ -2189,7 +2236,7 @@ class Trainer:
                     base_path=head_base,
                     preds=head_preds,
                     labels=head_labels,
-                    weights=weights,
+                    weights=head_weights,
                     raw_features=raw_features,
                     metrics=head_metrics,
                     head=head,

@@ -4,8 +4,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
-from evenet_lite.data import EvenetTensorDataset
+from evenet_lite.data import EvenetTensorDataset, build_sampler
 from evenet_lite.metrics import compute_classification_metrics, compute_loss
 from evenet_lite.trainer import Trainer, TrainerConfig
 
@@ -57,6 +58,132 @@ class ThreeHeadLinearClassifier(torch.nn.Module):
 
 
 class MulticlassMetricsTest(unittest.TestCase):
+    def test_single_head_weighted_dataset_and_loss_are_unchanged(self):
+        features = {"globals": torch.tensor([[3.0, 0.0], [0.0, 3.0], [1.0, 1.0]])}
+        labels = torch.tensor([0, 1, 0])
+        weights = torch.tensor([1.0, 4.0, 2.0])
+        dataset = EvenetTensorDataset(features, labels, weights)
+        _, batch_labels, batch_weights = next(iter(DataLoader(dataset, batch_size=3)))
+
+        self.assertIsInstance(batch_weights, torch.Tensor)
+        torch.testing.assert_close(batch_weights, weights)
+        expected = compute_loss(features["globals"], labels, weights, gamma=0.0)
+        actual = compute_loss(features["globals"], batch_labels, batch_weights, gamma=0.0)
+        torch.testing.assert_close(actual, expected)
+
+        class SingleHeadLinearClassifier(torch.nn.Module):
+            num_classes = 2
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(2, 2)
+
+            def forward(self, globals: torch.Tensor, **_: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+                return self.linear(globals)
+
+        trainer = Trainer(
+            SingleHeadLinearClassifier(),
+            {"globals": ["a", "b"]},
+            TrainerConfig(
+                device="cpu", num_workers=0, use_wandb=False, compute_physics_metrics=False,
+                lr=[1e-3], weight_decay=[0.0], module_lists=[["linear"]],
+            ),
+            class_labels=["a", "b"],
+        )
+        trainer.train((features, labels, weights), None, None, epochs=1, batch_size=3, sampler=None)
+        self.assertEqual(trainer.global_step, 1)
+
+    def test_multi_head_per_head_weights_batch_and_train_validation_step(self):
+        features = {"globals": torch.randn(4, 5)}
+        labels = {
+            "cls1": torch.tensor([0, 1, 2, 1]),
+            "cls2": torch.tensor([0, 1, 0, 1]),
+        }
+        weights = {
+            "cls1": torch.tensor([1.0, 2.0, 3.0, 4.0]),
+            "cls2": torch.tensor([4.0, 3.0, 2.0, 1.0]),
+        }
+        class_labels = {
+            "cls1": {"name": ["a", "b", "c"], "lambda": 1.0},
+            "cls2": {"name": ["x", "y"], "lambda": 0.5},
+        }
+        dataset = EvenetTensorDataset(features, labels, weights)
+        _, batch_labels, batch_weights = next(iter(DataLoader(dataset, batch_size=2, shuffle=False)))
+        self.assertEqual(set(batch_labels), {"cls1", "cls2"})
+        self.assertEqual(set(batch_weights), {"cls1", "cls2"})
+        torch.testing.assert_close(batch_weights["cls1"], weights["cls1"][:2])
+        torch.testing.assert_close(batch_weights["cls2"], weights["cls2"][:2])
+
+        trainer = Trainer(
+            MultiHeadLinearClassifier(),
+            {"globals": ["a", "b", "c", "x", "y"]},
+            TrainerConfig(
+                device="cpu", num_workers=0, use_wandb=False, compute_physics_metrics=False,
+                loss_gamma={"cls1": 0.0, "cls2": 0.0}, lr=[1e-3], weight_decay=[0.0],
+                module_lists=[["cls1", "cls2"]],
+            ),
+            class_labels=class_labels,
+        )
+        trainer.train((features, labels, weights), (features, labels, weights), None, epochs=1, batch_size=4, sampler=None)
+
+        self.assertEqual(trainer.global_step, 1)
+        metrics = trainer._run_epoch(trainer.model, trainer.val_loader, epoch=1, training=False)
+        self.assertIn("cls1/loss", metrics)
+        self.assertIn("cls2/loss", metrics)
+
+    def test_multi_head_weights_ignore_index_affects_neither_loss_nor_metrics(self):
+        features = {
+            "globals": torch.tensor(
+                [[4.0, 0.0, 0.0, 4.0, 0.0], [0.0, 4.0, 0.0, 0.0, 4.0], [0.0, 0.0, 4.0, 4.0, 0.0]]
+            )
+        }
+        labels = {
+            "cls1": torch.tensor([0, -100, 2]),
+            "cls2": torch.tensor([-100, 1, 0]),
+        }
+        weights = {
+            "cls1": torch.tensor([2.0, 999.0, 3.0]),
+            "cls2": torch.tensor([999.0, 5.0, 7.0]),
+        }
+        class_labels = {
+            "cls1": {"name": ["a", "b", "c"], "lambda": 1.0},
+            "cls2": {"name": ["x", "y"], "lambda": 1.0},
+        }
+        dataset = EvenetTensorDataset(features, labels, weights)
+        trainer = Trainer(
+            MultiHeadPassthroughClassifier(),
+            {"globals": ["a", "b", "c", "x", "y"]},
+            TrainerConfig(
+                device="cpu", num_workers=0, use_wandb=False, compute_physics_metrics=False,
+                loss_gamma={"cls1": 0.0, "cls2": 0.0},
+            ),
+            class_labels=class_labels,
+        )
+
+        metrics = trainer.evaluate(dataset, batch_size=2)
+        expected_cls1_loss = compute_loss(features["globals"][:, :3], labels["cls1"], weights["cls1"], gamma=0.0)
+        expected_cls2_loss = compute_loss(features["globals"][:, 3:5], labels["cls2"], weights["cls2"], gamma=0.0)
+        self.assertAlmostEqual(metrics["cls1/loss"], expected_cls1_loss.item())
+        self.assertAlmostEqual(metrics["cls2/loss"], expected_cls2_loss.item())
+        self.assertEqual(metrics["cls1/support_a"], 2.0)
+        self.assertEqual(metrics["cls1/support_c"], 3.0)
+        self.assertEqual(metrics["cls2/support_x"], 7.0)
+        self.assertEqual(metrics["cls2/support_y"], 5.0)
+
+    def test_per_head_weight_mapping_validation_and_weighted_sampler_error(self):
+        features = {"globals": torch.randn(3, 5)}
+        labels = {"cls1": torch.tensor([0, 1, 2]), "cls2": torch.tensor([0, 1, 0])}
+        with self.assertRaisesRegex(ValueError, "exactly match label heads"):
+            EvenetTensorDataset(features, labels, {"cls1": torch.ones(3)})
+        with self.assertRaisesRegex(ValueError, "shape \\[N\\]"):
+            EvenetTensorDataset(features, labels, {"cls1": torch.ones(3, 1), "cls2": torch.ones(3)})
+        with self.assertRaisesRegex(ValueError, "must match labels length"):
+            EvenetTensorDataset(features, labels, {"cls1": torch.ones(2), "cls2": torch.ones(3)})
+
+        dataset = EvenetTensorDataset(features, labels, {"cls1": torch.ones(3), "cls2": torch.ones(3)})
+        with self.assertRaisesRegex(ValueError, "does not support per-head sample_weights"):
+            build_sampler("weighted", dataset, dataset.sample_weights)
+
     def test_compute_loss_ignores_ignore_index(self):
         logits = torch.tensor(
             [

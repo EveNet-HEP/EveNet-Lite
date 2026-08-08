@@ -9,13 +9,17 @@ from .callbacks import EvenetLiteNormalizer
 from .heads import DEFAULT_HEAD
 
 
+SampleWeights = torch.Tensor | Mapping[str, torch.Tensor]
+
+
 class EvenetTensorDataset(Dataset):
     """Dataset wrapper around in-memory tensors.
 
     Args:
         features: Mapping of feature group name to tensor with leading batch dimension.
         labels: Target labels tensor, or ``head -> labels`` for multi-head classifiers.
-        sample_weights: Optional per-sample weights tensor.
+        sample_weights: Optional per-sample weights tensor, or ``head -> weights``
+            for multi-head labels.
         normalizer: Normalizer applied on-the-fly when retrieving items.
     """
 
@@ -23,7 +27,7 @@ class EvenetTensorDataset(Dataset):
             self,
             features: Dict[str, torch.Tensor],
             labels: torch.Tensor | Mapping[str, torch.Tensor],
-            sample_weights: Optional[torch.Tensor] = None,
+            sample_weights: Optional[SampleWeights] = None,
             normalizer: Optional[EvenetLiteNormalizer] = None,
             include_indices: bool = False,
     ) -> None:
@@ -40,9 +44,25 @@ class EvenetTensorDataset(Dataset):
             self.labels = {head: torch.as_tensor(value).long() for head, value in labels.items()}
         else:
             self.labels = torch.as_tensor(labels).long()
-        self.sample_weights = (
-            torch.as_tensor(sample_weights, dtype=torch.float32) if sample_weights is not None else None
-        )
+        if isinstance(sample_weights, Mapping):
+            if not isinstance(self.labels, dict):
+                raise ValueError("per-head sample_weights require labels to be a head dictionary")
+            label_heads = set(self.labels)
+            weight_heads = set(sample_weights)
+            if weight_heads != label_heads:
+                raise ValueError(
+                    "sample_weights heads must exactly match label heads; "
+                    f"got {sorted(repr(head) for head in weight_heads)}, "
+                    f"expected {sorted(repr(head) for head in label_heads)}"
+                )
+            self.sample_weights: Optional[SampleWeights] = {
+                head: torch.as_tensor(sample_weights[head], dtype=torch.float32)
+                for head in self.labels
+            }
+        else:
+            self.sample_weights = (
+                torch.as_tensor(sample_weights, dtype=torch.float32) if sample_weights is not None else None
+            )
         self.normalizer = normalizer
         self.include_indices = include_indices
 
@@ -61,15 +81,38 @@ class EvenetTensorDataset(Dataset):
             return self.labels[resolved]
         return self.labels
 
+    def weights_for(self, head: Optional[str] = None) -> Optional[torch.Tensor]:
+        """Return weights for one head, preserving shared-weight compatibility."""
+
+        if isinstance(self.sample_weights, Mapping):
+            resolved = head if head is not None else self.label_heads[0]
+            return self.sample_weights[resolved]
+        return self.sample_weights
+
     def _validate_lengths(self) -> int:
+        label_tensors = self.labels.values() if isinstance(self.labels, dict) else [self.labels]
+        for tensor in label_tensors:
+            if tensor.dim() != 1:
+                raise ValueError("labels must be 1D class-index tensors")
         label_tensors = self.labels.values() if isinstance(self.labels, dict) else [self.labels]
         lengths = {int(tensor.shape[0]) for tensor in label_tensors}
         if len(lengths) != 1:
             raise ValueError("all label tensors must have the same leading dimension")
         length = lengths.pop()
 
-        if self.sample_weights is not None and self.sample_weights.shape[0] != length:
-            raise ValueError("sample_weights length must match labels")
+        if isinstance(self.sample_weights, Mapping):
+            for head, weights in self.sample_weights.items():
+                if weights.dim() != 1:
+                    raise ValueError(f"sample_weights[{head!r}] must have shape [N]")
+                if weights.shape[0] != length:
+                    raise ValueError(
+                        f"sample_weights[{head!r}] length {weights.shape[0]} must match labels length {length}"
+                    )
+        elif self.sample_weights is not None:
+            if self.sample_weights.dim() != 1:
+                raise ValueError("sample_weights must have shape [N]")
+            if self.sample_weights.shape[0] != length:
+                raise ValueError("sample_weights length must match labels")
 
         for name, tensor in self.raw_features.items():
             if tensor.shape[0] != length:
@@ -102,10 +145,15 @@ class EvenetTensorDataset(Dataset):
     def __len__(self) -> int:
         return self._length
 
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Any, Optional[torch.Tensor]]:
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Any, Any]:
         features = {k: v[idx] for k, v in self.features.items()}
         label = {head: value[idx] for head, value in self.labels.items()} if isinstance(self.labels, dict) else self.labels[idx]
-        weight = self.sample_weights[idx] if self.sample_weights is not None else torch.tensor(1.0, dtype=torch.float32)
+        if isinstance(self.sample_weights, Mapping):
+            weight: Any = {head: value[idx] for head, value in self.sample_weights.items()}
+        elif self.sample_weights is not None:
+            weight = self.sample_weights[idx]
+        else:
+            weight = torch.tensor(1.0, dtype=torch.float32)
         if self.include_indices:
             return features, label, weight, torch.tensor(idx, dtype=torch.long)
         return features, label, weight
@@ -160,10 +208,15 @@ class DistributedWeightedSampler(Sampler[int]):
 def build_sampler(
         sampler: Optional[str],
         dataset: EvenetTensorDataset,
-        weights: Optional[torch.Tensor],
+        weights: Optional[SampleWeights],
         epoch_size: Optional[int] = None,
 ) -> Optional[Sampler[int]]:
     if sampler == "weighted":
+        if isinstance(weights, Mapping):
+            raise ValueError(
+                "sampler='weighted' does not support per-head sample_weights; use sampler=None "
+                "or provide one shared weight tensor"
+            )
         if weights is None:
             if isinstance(dataset.labels, dict):
                 raise ValueError("weighted sampler with multi-head labels requires explicit sample weights")

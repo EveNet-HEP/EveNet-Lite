@@ -6,6 +6,7 @@ import torch
 
 from .callbacks import Callback
 from .classifier import EvenetLiteClassifier
+from .data import SampleWeights
 
 
 def _detect_ddp() -> Tuple[bool, int, int]:
@@ -29,12 +30,12 @@ def _configure_logging(log_level: int) -> None:
 def run_evenet_lite_training(
     train_features: Dict[str, torch.Tensor],
     train_labels: Any,
-    train_weights: Optional[torch.Tensor] = None,
+    train_weights: Optional[SampleWeights] = None,
     *,
     class_labels: Any,
     val_features: Optional[Dict[str, torch.Tensor]] = None,
     val_labels: Optional[Any] = None,
-    val_weights: Optional[torch.Tensor] = None,
+    val_weights: Optional[SampleWeights] = None,
     feature_names: Optional[Dict[str, Iterable[str]]] = None,
     normalization_rules: Optional[Dict[str, Dict[str, str]]] = None,
     normalization_stats: Optional[Dict[str, Any]] = None,
@@ -54,7 +55,7 @@ def run_evenet_lite_training(
     early_stop_patience: int = 0,
     eval_features: Optional[Dict[str, torch.Tensor]] = None,
     eval_labels: Optional[Any] = None,
-    eval_weights: Optional[torch.Tensor] = None,
+    eval_weights: Optional[SampleWeights] = None,
     eval_output_path: Optional[str] = None,
     eval_batch_size: Optional[int] = None,
     physics_metric_config: Optional[Dict[str, Any]] = None,
@@ -76,12 +77,17 @@ def run_evenet_lite_training(
             matching the model contract (e.g., ``{"objects": Tensor[N, M, F]}``).
         train_labels: Class indices for each training example, or ``head -> labels`` for multi-head training.
         train_weights: Optional per-example weights aligned with ``train_labels``.
+            For multi-head labels, provide ``head -> Tensor[N]`` for independent
+            per-head weighting (a shared tensor remains supported for compatibility).
         class_labels: Ordered class names or a multi-head dictionary passed to
             :class:`EvenetLiteClassifier`.
         val_features: Optional validation features following the same structure
             as ``train_features``.
         val_labels: Optional validation labels aligned with ``val_features``.
-        val_weights: Optional per-example validation weights.
+        val_weights: Optional per-example validation weights, including an optional
+            ``head -> Tensor[N]`` mapping for multi-head validation.
+        eval_weights: Optional evaluation weights, including an optional
+            ``head -> Tensor[N]`` mapping for multi-head evaluation.
         feature_names: Optional mapping of feature group name to the list of
             feature strings, used by normalization callbacks.
         normalization_rules: Optional normalization configuration passed through
