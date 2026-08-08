@@ -161,6 +161,10 @@ train_labels = {
     "cls1": y_train_cls1,
     "cls2": y_train_cls2,
 }
+train_weights = {
+    "cls1": w_train_cls1,
+    "cls2": w_train_cls2,
+}
 # Use -100 for rows that should not train or score a given head.
 train_labels["cls1"][cls2_only_rows] = -100
 
@@ -171,13 +175,21 @@ clf = EvenetLiteClassifier(
 )
 clf.fit(
     train_data=(train_features, train_labels, train_weights),
-    val_data=(val_features, {"cls1": y_val_cls1, "cls2": y_val_cls2}, val_weights),
+    val_data=(
+        val_features,
+        {"cls1": y_val_cls1, "cls2": y_val_cls2},
+        {"cls1": w_val_cls1, "cls2": w_val_cls2},
+    ),
     physics_metric_config={"cls1": {"SIC_base": ["a"]}, "cls2": {}},
 )
 ```
 
 All multi-head dictionaries must use the same head names. `train_labels`, `val_labels`, `eval_labels`,
-`loss_gamma`, and non-empty `physics_metric_config` are validated against `class_labels` and abort on mismatch.
+per-head `train_weights`/`val_weights`/`eval_weights`, `loss_gamma`, and non-empty `physics_metric_config` are
+validated against `class_labels` and abort on mismatch. Each per-head weight tensor must have shape `[N]` and is
+normalized by the sum of active (non-ignored) weights for that head. A shared weight tensor remains supported for
+backward compatibility. Per-head weight mappings require `sampler=None`; `sampler="weighted"` has no unambiguous
+multi-head sampling policy and raises an error.
 Labels equal to `ignore_index` are skipped per head in validation, loss, metrics, plots, and physics metrics.
 Metrics and W&B logs are prefixed by head name, e.g. `cls1/accuracy` and `cls2/metric-AUC/val_weighted`.
 Legacy list `class_labels` keeps the previous single-head behavior.
@@ -246,9 +258,9 @@ The tables below summarize the most-used entrypoints and their arguments. Defaul
 
 | Argument                                                            | Default                              | Description                                                        |
 |---------------------------------------------------------------------|--------------------------------------|--------------------------------------------------------------------|
-| `train_features` / `train_labels` / `train_weights`                 | **required** / **required** / `None` | Training tensors and optional weights.                             |
+| `train_features` / `train_labels` / `train_weights`                 | **required** / **required** / `None` | Training tensors and optional weights; multi-head accepts `head -> Tensor[N]`. |
 | `class_labels`                                                      | **required**                         | Ordered class names or a multi-head dictionary passed to the classifier. |
-| `val_features` / `val_labels` / `val_weights`                       | `None`                               | Optional validation tensors and weights.                           |
+| `val_features` / `val_labels` / `val_weights`                       | `None`                               | Optional validation tensors and weights; multi-head accepts `head -> Tensor[N]`. |
 | `feature_names`                                                     | `None`                               | Feature column names forwarded to the classifier.                  |
 | `normalization_rules`                                               | `None`                               | Per-feature normalization overrides.                               |
 | `normalization_stats`                                               | `None`                               | Optional precomputed means/stds per feature group; missing values default to mean 0/std 1. |
